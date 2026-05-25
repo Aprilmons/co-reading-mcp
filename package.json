@@ -10,6 +10,7 @@
     "scripts/import_epub.py",
     "scripts/import_text.py",
     "scripts/smoke.mjs",
+    "scripts/card-smoke.mjs",
     "docs",
     "data.example",
     "README.md",
@@ -25,6 +26,7 @@
     "reader": "node src/http.js",
     "start:sse": "node src/server-sse.js",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:cards": "node scripts/card-smoke.mjs",
     "import:text": "python3 scripts/import_text.py",
     "import:epub": "python3 scripts/import_epub.py"
   },

@@ -62,6 +62,31 @@ Annotations are stored as JSONL in `data/annotations.jsonl`.
 
 `parentId` creates threads. A Claude reply under a user note stores the user's annotation id as `parentId`.
 
+## Cards
+
+Ritual cards/bookmarks are stored as JSONL in `data/cards.jsonl`.
+
+```json
+{
+  "id": "card_...",
+  "bookId": "anthropic-guidelines",
+  "chunkId": "ch00",
+  "bookTitle": "The Anthropic Guidelines",
+  "chunkTitle": "Claude and the mission of Anthropic",
+  "kicker": "收获了一枚回声书签",
+  "title": "The Anthropic Guidelines",
+  "quote": "selected passage",
+  "note": "why this passage became a card",
+  "art": "fold",
+  "variant": "quiet",
+  "source": "manual",
+  "createdBy": "claude",
+  "createdAt": "2026-05-22T00:00:00.000Z"
+}
+```
+
+`art` is intentionally abstract: `fold`, `ripple`, or `stardust`. Cards are separate from annotations so a finished-section ritual does not create a new margin note.
+
 ## Progress
 
 Progress is stored in `data/progress.json`.

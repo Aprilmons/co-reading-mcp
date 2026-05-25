@@ -3,14 +3,20 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
   annotatePassage,
+  collectCard,
   continueReading,
   dataDir,
+  dismissCard,
   getProgress,
+  listCardInbox,
+  listCardCollection,
+  listCards,
   listAnnotations,
   listBooks,
   listChunks,
   listSubmissions,
   markRead,
+  readCard,
   readChunk,
   readSubmission,
   replyToAnnotation,
@@ -24,6 +30,7 @@ import {
   finishImport,
   importBook,
 } from "./importer.js";
+import { renderCardImageContent } from "./card-renderer.js";
 
 const protocolVersion = "2024-11-05";
 
@@ -285,6 +292,94 @@ export const tools = [
     annotations: { title: "Mark Read" },
   },
   {
+    name: "reading_card_inbox",
+    description: "Show unread collected reading-card prompts, like a small bookmark inbox.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bookId: { type: "string" },
+        limit: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Reading Card Inbox", readOnlyHint: true },
+  },
+  {
+    name: "reading_card_collection",
+    description: "Browse collected reading cards as a paginated collection without opening every image.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bookId: { type: "string" },
+        limit: { type: "number" },
+        offset: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Reading Card Collection", readOnlyHint: true },
+  },
+  {
+    name: "reading_open_card",
+    description: "Open one collected reading card and return it as an image for Claude to view.",
+    inputSchema: {
+      type: "object",
+      required: ["cardId"],
+      properties: { cardId: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { title: "Open Reading Card", readOnlyHint: true },
+  },
+  {
+    name: "reading_dismiss_card",
+    description: "Dismiss one collected reading card from the card inbox without deleting it.",
+    inputSchema: {
+      type: "object",
+      required: ["cardId"],
+      properties: { cardId: { type: "string" } },
+      additionalProperties: false,
+    },
+    annotations: { title: "Dismiss Reading Card" },
+  },
+  {
+    name: "reading_list_cards",
+    description: "List collected ritual reading cards/bookmarks for completed sections or shared margin moments.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bookId: { type: "string" },
+        chunkId: { type: "string" },
+        source: { type: "string" },
+        limit: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "List Reading Cards", readOnlyHint: true },
+  },
+  {
+    name: "reading_collect_card",
+    description: "Collect a small ritual reading card/bookmark so it can be revisited later.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        bookId: { type: "string" },
+        chunkId: { type: "string" },
+        bookTitle: { type: "string" },
+        chunkTitle: { type: "string" },
+        title: { type: "string" },
+        subtitle: { type: "string" },
+        kicker: { type: "string" },
+        quote: { type: "string" },
+        note: { type: "string" },
+        footer: { type: "string" },
+        art: { type: "string", enum: ["fold", "ripple", "stardust"] },
+        variant: { type: "string" },
+        source: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Collect Reading Card" },
+  },
+  {
     name: "reading_get_progress",
     description: "Get reading progress for one book or all books.",
     inputSchema: {
@@ -311,6 +406,15 @@ function textContent(value) {
         type: "text",
         text: typeof value === "string" ? value : JSON.stringify(value, null, 2),
       },
+    ],
+  };
+}
+
+function imageContent({ text, image }) {
+  return {
+    content: [
+      { type: "text", text },
+      image,
     ],
   };
 }
@@ -351,6 +455,23 @@ export async function callTool(name, args = {}) {
       return textContent(await replyToAnnotation({ ...args, author: "claude", status: "published" }));
     case "reading_mark_read":
       return textContent(await markRead(args.bookId, args.chunkId));
+    case "reading_card_inbox":
+      return textContent(await listCardInbox(args));
+    case "reading_card_collection":
+      return textContent(await listCardCollection(args));
+    case "reading_open_card": {
+      const card = await readCard(args.cardId);
+      return imageContent({
+        text: `${card.kicker || "收获了一枚回声书签"}\n${card.title || card.bookTitle || "Reading card"}`,
+        image: renderCardImageContent(card),
+      });
+    }
+    case "reading_dismiss_card":
+      return textContent(await dismissCard(args.cardId));
+    case "reading_list_cards":
+      return textContent(await listCards(args));
+    case "reading_collect_card":
+      return textContent(await collectCard({ ...args, createdBy: "claude" }));
     case "reading_get_progress":
       return textContent(await getProgress(args.bookId));
     default:
@@ -370,6 +491,7 @@ export async function handle(message) {
         `Use this server as a shared co-reading surface. ` +
         `Claude can import EPUB/TXT uploads, continue reading, read chunked books, search passages, track progress, leave margin annotations, ` +
         `reply under user notes, and call reading_submit_user_notes when the human sends staged notes. ` +
+        `Reading actions may return cardNotification when a bookmark card is waiting; open it with reading_open_card or clear it with reading_dismiss_card. Use reading_card_collection to browse cards by pages without loading every image. ` +
         `Use reading_import_book for small uploads, or reading_import_begin/part/finish for large files. ` +
         `If this server is running through src/server-sse.js, the same process can also serve the human reader at /, REST API at /api/*, SSE MCP at /sse, and JSON-RPC POST at /mcp. ` +
         `Data dir: ${dataDir}`,

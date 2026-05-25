@@ -253,6 +253,64 @@ When the marked chunk completes the book, the response also includes:
 
 `finish.celebration` is intentionally small and variable. Claude can use it as a closing ritual, or a frontend can ignore it and keep only the stable counts.
 
+## `reading_collect_card`
+
+Input:
+
+```json
+{
+  "bookId": "anthropic-guidelines",
+  "chunkId": "ch00",
+  "kicker": "收获了一枚回声书签",
+  "title": "Book Title",
+  "quote": "a sentence worth carrying forward",
+  "note": "Why this passage became a card.",
+  "art": "fold"
+}
+```
+
+Collects a small ritual reading card/bookmark for later. `art` can be `fold`, `ripple`, or `stardust`. Use this for completed sections, shared-margin moments, or quiet passages worth carrying forward.
+
+## `reading_card_inbox`
+
+Input:
+
+```json
+{ "bookId": "anthropic-guidelines", "limit": 10 }
+```
+
+Returns only unread card prompts, such as “收获了一枚回声书签”, with the `cardId` needed to open or dismiss them. This is the reader-facing flow Claude should use instead of reading raw card data.
+
+## `reading_open_card`
+
+Input:
+
+```json
+{ "cardId": "card_..." }
+```
+
+Returns the selected card as `image/svg+xml` content so Claude can view the card image directly. The text part is only a short caption.
+
+## `reading_dismiss_card`
+
+Input:
+
+```json
+{ "cardId": "card_..." }
+```
+
+Marks a card as dismissed so it no longer appears in `reading_card_inbox`. The card remains in `cards.jsonl` and can still be found with `reading_list_cards`.
+
+## `reading_list_cards`
+
+Input:
+
+```json
+{ "bookId": "anthropic-guidelines", "limit": 10 }
+```
+
+Lists collected cards, newest first. Cards are stored separately from annotations in `cards.jsonl`, so they can act like lightweight bookmarks instead of new margin notes.
+
 ## `reading_get_progress`
 
 Input:

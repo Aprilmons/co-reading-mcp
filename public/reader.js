@@ -1,3 +1,5 @@
+import { buildCardCandidates, normalizeForOverlap, pickCard, sharedNoteIdSet } from "./card-logic.js";
+
 const state = {
   books: [],
   chunks: [],
@@ -8,6 +10,10 @@ const state = {
   quote: "",
   selectedQuote: "",
   activeAnnotationId: null,
+  cardCandidates: [],
+  cardIndex: 0,
+  lastFinish: null,
+  toastTimer: null,
   refreshInFlight: false,
 };
 
@@ -69,6 +75,15 @@ function scrollToPanel(selector) {
   requestAnimationFrame(() => {
     document.querySelector(selector)?.scrollIntoView({ block: "start", behavior: "smooth" });
   });
+}
+
+function showToast(message) {
+  clearTimeout(state.toastTimer);
+  $("toast").textContent = message;
+  $("toast").hidden = false;
+  state.toastTimer = setTimeout(() => {
+    $("toast").hidden = true;
+  }, 2400);
 }
 
 function formatIdentity(author) {
@@ -139,12 +154,22 @@ function renderText() {
   if (!state.chunk) return;
   let html = escapeHtml(state.chunk.text);
   const notes = state.annotations.filter((item) => item.chunkId === state.chunkId);
-  for (const note of notes.filter((item) => !item.parentId && item.quote)) {
+  const sharedIds = sharedNoteIdSet(notes);
+  const seenQuotes = new Set();
+  const rootNotes = notes
+    .filter((item) => !item.parentId && item.quote)
+    .sort((a, b) => Number(sharedIds.has(b.id)) - Number(sharedIds.has(a.id)));
+  for (const note of rootNotes) {
+    const normalizedQuote = normalizeForOverlap(note.quote);
+    if (seenQuotes.has(normalizedQuote)) continue;
+    seenQuotes.add(normalizedQuote);
     const quote = escapeHtml(note.quote);
     if (quote && html.includes(quote)) {
+      const shared = sharedIds.has(note.id);
+      const bookmark = shared ? `<span class="shared-bookmark" title="这里有两个人的折痕。">此处有回声</span>` : "";
       html = html.replace(
         quote,
-        `<mark class="${note.id === state.activeAnnotationId ? "active" : ""}" data-note-id="${escapeHtml(note.id)}" title="${escapeHtml(note.note)}">${quote}</mark>${
+        `<mark class="${note.id === state.activeAnnotationId ? "active" : ""} ${shared ? "shared" : ""}" data-note-id="${escapeHtml(note.id)}" title="${escapeHtml(note.note)}">${quote}</mark>${bookmark}${
           note.id === state.activeAnnotationId ? renderInlineNote(note, notes) : ""
         }`,
       );
@@ -175,7 +200,9 @@ function renderAnnotations() {
     .map((note) => {
       const replies = notes.filter((item) => item.parentId === note.id);
       const expanded = note.id === state.activeAnnotationId;
+      const isShared = sharedNoteIdSet(notes).has(note.id);
       return `<article class="note-card ${(note.status || "") === "open" ? "open" : ""} ${expanded ? "active" : ""}" data-note-id="${escapeHtml(note.id)}" tabindex="0">
+        ${isShared ? `<p class="shared-line">这里有两个人的折痕。</p>` : ""}
         <p class="note-quote">${escapeHtml(note.quote)}</p>
         <p class="note-body">${escapeHtml(note.note)}</p>
         <div class="note-meta">${escapeHtml(formatIdentity(note.author))} · ${escapeHtml(note.kind || "note")} · ${escapeHtml(note.status || "published")}${replies.length ? ` · ${replies.length} replies` : ""}</div>
@@ -193,6 +220,146 @@ function renderAnnotations() {
   $("status").textContent = openCount
     ? `${openCount} private note${openCount === 1 ? "" : "s"} waiting.`
     : "Private notes stay local until you send them.";
+}
+
+function currentBook() {
+  return state.books.find((item) => item.bookId === state.bookId) || {};
+}
+
+function currentChunkMeta() {
+  return state.chunks.find((item) => item.id === state.chunkId) || state.chunk?.chunk || {};
+}
+
+function refreshCards({ finish = null, show = false } = {}) {
+  const chunkAnnotations = state.annotations.filter((item) => item.chunkId === state.chunkId);
+  state.cardCandidates = buildCardCandidates({
+    book: currentBook(),
+    chunk: { ...currentChunkMeta(), text: state.chunk?.text || "" },
+    annotations: chunkAnnotations,
+    finish,
+  });
+  if (state.cardIndex >= state.cardCandidates.length) state.cardIndex = 0;
+  $("show-card").disabled = state.cardCandidates.length === 0;
+  $("show-card").textContent = state.cardCandidates.length ? `Cards ${state.cardCandidates.length}` : "Cards";
+  if (show && state.cardCandidates.length) {
+    openCardPanel();
+  } else {
+    renderCardPanel();
+  }
+}
+
+function renderCardPanel() {
+  const card = pickCard(state.cardCandidates, state.cardIndex);
+  $("card-panel").hidden = !card || $("card-panel").hidden;
+  if (!card) {
+    $("card-preview").innerHTML = "";
+    return;
+  }
+  $("card-preview").innerHTML = renderReadingCard(card);
+}
+
+function seededRandom(seed) {
+  let value = (Number(seed) || 1) >>> 0;
+  return () => {
+    value ^= value << 13;
+    value ^= value >>> 17;
+    value ^= value << 5;
+    return (value >>> 0) / 4294967296;
+  };
+}
+
+function readingCardArt(card) {
+  const random = seededRandom(card.artSeed || 1);
+  if (card.art === "ripple") {
+    const centers = [
+      [25 + random() * 18, 20 + random() * 18],
+      [58 + random() * 18, 48 + random() * 18],
+      [22 + random() * 14, 72 + random() * 12],
+    ];
+    const circles = centers
+      .flatMap(([cx, cy], groupIndex) =>
+        Array.from({ length: groupIndex === 1 ? 4 : 3 }, (_, index) => {
+          const radius = 8 + index * (6 + random() * 3) + random() * 2;
+          const opacity = 0.035 + random() * 0.06;
+          return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
+        }),
+      )
+      .join("");
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.36">${circles}</g></svg>`;
+  }
+  if (card.art === "stardust") {
+    const dots = Array.from({ length: 64 }, () => {
+      const cx = 7 + random() * 86;
+      const cy = 8 + random() * 80;
+      const radius = 0.08 + random() * 0.24;
+      const opacity = 0.18 + random() * 0.42;
+      return `<circle cx="${cx.toFixed(2)}" cy="${cy.toFixed(2)}" r="${radius.toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
+    }).join("");
+    const bright = Array.from({ length: 7 }, () => {
+      const cx = 12 + random() * 76;
+      const cy = 12 + random() * 72;
+      const opacity = 0.22 + random() * 0.26;
+      return `<path d="M ${(cx - 0.9).toFixed(2)} ${cy.toFixed(2)} L ${(cx + 0.9).toFixed(2)} ${cy.toFixed(2)} M ${cx.toFixed(2)} ${(cy - 0.9).toFixed(2)} L ${cx.toFixed(2)} ${(cy + 0.9).toFixed(2)}" opacity="${opacity.toFixed(3)}" />`;
+    }).join("");
+    const lines = Array.from({ length: 5 }, () => {
+      const x1 = 8 + random() * 84;
+      const y1 = 10 + random() * 76;
+      const x2 = x1 + (random() - 0.5) * 12;
+      const y2 = y1 + (random() - 0.5) * 12;
+      return `<path d="M ${x1.toFixed(2)} ${y1.toFixed(2)} L ${x2.toFixed(2)} ${y2.toFixed(2)}" opacity="0.07" />`;
+    }).join("");
+    return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="currentColor">${dots}</g><g fill="none" stroke="currentColor" stroke-width="0.14">${lines}${bright}</g></svg>`;
+  }
+  const lines = Array.from({ length: 14 }, () => {
+    const x = 8 + random() * 84;
+    const drift = (random() - 0.5) * 10;
+    const opacity = 0.06 + random() * 0.14;
+    return `<path d="M ${x.toFixed(2)} 3 C ${(x + drift).toFixed(2)} 30 ${(x - drift).toFixed(2)} 62 ${x.toFixed(2)} 97" opacity="${opacity.toFixed(3)}" />`;
+  }).join("");
+  return `<svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="0.32">${lines}</g></svg>`;
+}
+
+function renderReadingCard(card) {
+  return `<article class="ritual-card ${escapeHtml(card.variant)} art-${escapeHtml(card.art || "fold")} ${escapeHtml(cardSizeClass(card))}">
+    <div class="card-art">${readingCardArt(card)}</div>
+    <div class="card-content">
+      <p class="card-kicker">${escapeHtml(card.kicker)}</p>
+      <h3>${escapeHtml(card.title)}</h3>
+      <p class="card-subtitle">${escapeHtml(card.subtitle)}</p>
+      <blockquote>${escapeHtml(card.quote)}</blockquote>
+      <div class="card-voices ${card.rightText ? "" : "single"}">
+        <section>
+          <span>${escapeHtml(card.leftLabel)}</span>
+          <p>${escapeHtml(card.leftText)}</p>
+        </section>
+        ${
+          card.rightText
+            ? `<section>
+                <span>${escapeHtml(card.rightLabel)}</span>
+                <p>${escapeHtml(card.rightText)}</p>
+              </section>`
+            : ""
+        }
+      </div>
+      <footer>${escapeHtml(card.footer)}</footer>
+    </div>
+  </article>`;
+}
+
+function cardSizeClass(card) {
+  const totalLength = [card.quote, card.leftText, card.rightText, card.note]
+    .filter(Boolean)
+    .join("")
+    .length;
+  if (totalLength < 120) return "card-compact";
+  if (totalLength > 360) return "card-tall";
+  return "card-standard";
+}
+
+function openCardPanel() {
+  if (!state.cardCandidates.length) return;
+  $("card-panel").hidden = false;
+  renderCardPanel();
 }
 
 function updateSelectionAction() {
@@ -234,6 +401,7 @@ async function selectChunk(chunkId) {
   state.chunkId = chunkId;
   state.activeAnnotationId = null;
   state.chunk = await api(`/api/books/${encodeURIComponent(state.bookId)}/chunks/${encodeURIComponent(chunkId)}`);
+  state.lastFinish = null;
   $("chunk-file").textContent = state.chunk.chunk.id;
   $("chunk-title").textContent = state.chunk.chunk.title;
   $("mark-read").disabled = false;
@@ -242,6 +410,7 @@ async function selectChunk(chunkId) {
   renderChunks();
   renderText();
   renderAnnotations();
+  refreshCards();
   scrollToPanel(".reader");
 }
 
@@ -278,6 +447,7 @@ async function refreshCurrent() {
       renderChunks();
       renderText();
       renderAnnotations();
+      refreshCards();
     }
   } finally {
     state.refreshInFlight = false;
@@ -378,11 +548,16 @@ $("submit-notes").addEventListener("click", async () => {
 });
 
 $("mark-read").addEventListener("click", async () => {
-  await api("/api/mark-read", {
+  const result = await api("/api/mark-read", {
     method: "POST",
     body: { bookId: state.bookId, chunkId: state.chunkId },
   });
+  state.lastFinish = result.finish || null;
   await refreshCurrent();
+  refreshCards({ finish: state.lastFinish, show: Boolean(state.lastFinish) });
+  if (!state.lastFinish && state.cardCandidates.some((card) => card.source === "shared")) {
+    showToast("收获了一枚回声书签");
+  }
 });
 
 $("continue-reading").addEventListener("click", async () => {
@@ -397,6 +572,18 @@ $("continue-reading").addEventListener("click", async () => {
 });
 
 $("refresh").addEventListener("click", () => refreshCurrent().catch(showError));
+
+$("show-card").addEventListener("click", openCardPanel);
+
+$("card-close").addEventListener("click", () => {
+  $("card-panel").hidden = true;
+});
+
+$("card-random").addEventListener("click", () => {
+  if (!state.cardCandidates.length) return;
+  state.cardIndex = (state.cardIndex + 1) % state.cardCandidates.length;
+  renderCardPanel();
+});
 
 $("import-book").addEventListener("click", () => {
   $("import-file").click();

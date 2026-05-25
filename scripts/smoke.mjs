@@ -257,7 +257,12 @@ const importText = [
   "",
   "Chapter Beta",
   "",
-  "Beta imported from a single MCP base64 payload.",
+  [
+    "Beta imported from a single MCP base64 payload.",
+    "This section carries enough text to behave like a real chapter rather than a title page.",
+    "It gives the ritual card rule enough signal to keep a resonant margin note after completion.",
+    "The smoke test uses it to prove that chapter completion can create a quiet bookmark card.",
+  ].join(" "),
 ].join("\n");
 const mcpImport = await request("tools/call", {
   name: "reading_import_book",
@@ -315,9 +320,56 @@ const markImportFirst = await request("tools/call", {
   name: "reading_mark_read",
   arguments: { bookId: "mcp-import", chunkId: "ch00" },
 });
+const importResonance = await request("tools/call", {
+  name: "reading_annotate_passage",
+  arguments: {
+    bookId: "mcp-import",
+    chunkId: "ch01",
+    quote: "Beta imported from a single MCP base64 payload.",
+    note: "This imported section is worth keeping as a completion card.",
+    kind: "resonance",
+  },
+});
 const markImportDone = await request("tools/call", {
   name: "reading_mark_read",
   arguments: { bookId: "mcp-import", chunkId: "ch01" },
+});
+const collectedCard = await request("tools/call", {
+  name: "reading_collect_card",
+  arguments: {
+    bookId: "mcp-import",
+    chunkId: "ch01",
+    kicker: "收获了一枚回声书签",
+    title: "MCP Import",
+    quote: "Beta imported from a single MCP base64 payload.",
+    note: "A smoke-test card from the margin.",
+    art: "stardust",
+    source: "smoke",
+  },
+});
+const listedCards = await request("tools/call", {
+  name: "reading_list_cards",
+  arguments: { bookId: "mcp-import" },
+});
+const cardInbox = await request("tools/call", {
+  name: "reading_card_inbox",
+  arguments: { bookId: "mcp-import" },
+});
+const cardCollection = await request("tools/call", {
+  name: "reading_card_collection",
+  arguments: { bookId: "mcp-import", limit: 10, offset: 0 },
+});
+const openedCard = await request("tools/call", {
+  name: "reading_open_card",
+  arguments: { cardId: contentJson(collectedCard).id },
+});
+const dismissedCard = await request("tools/call", {
+  name: "reading_dismiss_card",
+  arguments: { cardId: contentJson(collectedCard).id },
+});
+const dismissedInbox = await request("tools/call", {
+  name: "reading_card_inbox",
+  arguments: { bookId: "mcp-import" },
 });
 const badImportBookId = await request("tools/call", {
   name: "reading_import_book",
@@ -476,6 +528,23 @@ const httpReply = await fetchJson("/api/replies", {
     author: "user",
   },
 });
+const httpCard = await fetchJson("/api/cards", {
+  method: "POST",
+  body: {
+    bookId: "anthropic-guidelines",
+    chunkId: "ch00",
+    kicker: "这里有两个人的折痕。",
+    title: "HTTP Card",
+    quote: "Claude is trained by Anthropic",
+    note: "HTTP reader collected a card.",
+    art: "fold",
+  },
+});
+const httpCards = await fetchJson("/api/cards?bookId=anthropic-guidelines");
+const httpCardInbox = await fetchJson("/api/card-inbox?bookId=anthropic-guidelines");
+const httpCardCollection = await fetchJson("/api/card-collection?bookId=anthropic-guidelines&limit=1");
+const httpCardSvg = await fetch(`http://127.0.0.1:${httpPort}/api/cards/${httpCard.id}/image.svg`);
+const httpCardDismiss = await fetchJson(`/api/cards/${httpCard.id}/dismiss`, { method: "POST" });
 const httpImport = await fetchJson("/api/import", {
   method: "POST",
   body: {
@@ -624,6 +693,24 @@ if (contentJson(markImportDone).complete !== true || !contentJson(markImportDone
 if (!contentJson(markImportDone).finish?.celebration?.prompt) {
   throw new Error("reading_mark_read did not return a finish celebration prompt");
 }
+if (!contentJson(importResonance).id || !contentJson(markImportDone).cardNotification?.cardId) {
+  throw new Error("reading_mark_read did not generate a card notification at a resonant section completion");
+}
+if (!contentJson(collectedCard).id || !contentJson(listedCards).some((card) => card.id === contentJson(collectedCard).id)) {
+  throw new Error("reading_collect_card/list_cards did not preserve a collected card");
+}
+if (!contentJson(cardInbox).some((card) => card.id === contentJson(collectedCard).id)) {
+  throw new Error("reading_card_inbox did not show a collected card");
+}
+if (!contentJson(cardCollection).items?.some((card) => card.id === contentJson(collectedCard).id)) {
+  throw new Error("reading_card_collection did not page collected cards");
+}
+if (openedCard.result?.content?.[1]?.type !== "image" || openedCard.result.content[1].mimeType !== "image/svg+xml") {
+  throw new Error("reading_open_card did not return an SVG image");
+}
+if (contentJson(dismissedCard).status !== "dismissed" || contentJson(dismissedInbox).some((card) => card.id === contentJson(collectedCard).id)) {
+  throw new Error("reading_dismiss_card did not clear the inbox item");
+}
 if (!badImportBookId.error?.message.includes("bookId may only contain")) {
   throw new Error("reading_import_book did not reject unsafe bookId");
 }
@@ -692,6 +779,21 @@ if (!httpNote.id) {
 }
 if (httpReply.parentId !== httpNote.id || httpReply.kind !== "reply") {
   throw new Error("HTTP API did not attach a reply");
+}
+if (!httpCard.id || !httpCards.some((card) => card.id === httpCard.id)) {
+  throw new Error("HTTP API did not create/list reading cards");
+}
+if (!httpCardInbox.some((card) => card.id === httpCard.id)) {
+  throw new Error("HTTP API did not show card inbox");
+}
+if (httpCardCollection.items?.[0]?.id !== httpCard.id) {
+  throw new Error("HTTP API did not page card collection");
+}
+if (!httpCardSvg.ok || !(await httpCardSvg.text()).includes("<svg")) {
+  throw new Error("HTTP API did not render card SVG");
+}
+if (httpCardDismiss.status !== "dismissed") {
+  throw new Error("HTTP API did not dismiss reading card");
 }
 if (httpImport.bookId !== "http-import" || httpImport.chunkCount !== 2) {
   throw new Error("HTTP API did not import a book");

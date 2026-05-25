@@ -10,6 +10,7 @@ A local MCP server that gives Claude a durable reading room:
 - write margin annotations
 - stage user notes, submit them to Claude once, and attach Claude replies under them
 - track reading progress
+- surface small shared-margin cards when human and Claude stop at the same passage
 - return a small finish ritual when a book is completed
 
 The goal is not one-shot summarization. The goal is a shared reading surface where a human and Claude can both read, leave anchored notes, and resume smoothly. Human notes can also stay private until the reader chooses to share them with Claude.
@@ -192,6 +193,11 @@ data/
 - `reading_read_submission`
 - `reading_reply_to_annotation`
 - `reading_mark_read`
+- `reading_card_inbox`
+- `reading_open_card`
+- `reading_dismiss_card`
+- `reading_list_cards`
+- `reading_collect_card`
 - `reading_get_progress`
 
 See [docs/mcp-tools.md](docs/mcp-tools.md) and [docs/data-format.md](docs/data-format.md).
@@ -214,6 +220,8 @@ The bundled reader is intentionally small: it is a reference UI, not a required 
 - `POST /api/import`
 
 Human notes are saved as open local notes first. Pressing "Send to Claude" calls `reading_submit_user_notes`, includes chunk context according to the session policy, marks those notes submitted, and avoids resending the same open notes.
+
+Small ritual cards/bookmarks can be collected with `reading_collect_card`. Claude can then use `reading_card_inbox` like a quiet bookmark inbox, open a visual SVG card with `reading_open_card`, or clear it with `reading_dismiss_card`. They are meant for completed sections, shared-margin moments, or quiet passages worth carrying forward.
 
 ## Privacy
 

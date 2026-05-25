@@ -8,6 +8,7 @@
   --line: rgba(45, 42, 36, 0.1);
   --accent: #d9795c;
   --accent-soft: rgba(217, 121, 92, 0.14);
+  --blue-soft: rgba(108, 142, 184, 0.16);
   --shadow: 0 18px 60px rgba(36, 31, 24, 0.08);
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", sans-serif;
@@ -189,8 +190,24 @@ h2 {
   cursor: pointer;
 }
 
+.text mark.shared {
+  background: linear-gradient(90deg, var(--accent-soft), var(--blue-soft));
+}
+
 .text mark.active {
   box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.shared-bookmark {
+  display: inline-block;
+  margin-left: 0.35em;
+  color: var(--muted);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  font-size: 0.54em;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  vertical-align: 0.12em;
 }
 
 .empty {
@@ -216,6 +233,13 @@ h2 {
 .note-card.active {
   border-color: var(--accent);
   background: var(--panel-strong);
+}
+
+.shared-line {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .inline-note {
@@ -300,6 +324,228 @@ h2 {
   background: rgba(255, 255, 255, 0.78);
   box-shadow: var(--shadow);
   backdrop-filter: blur(22px);
+}
+
+.toast {
+  position: fixed;
+  z-index: 13;
+  left: 50%;
+  bottom: 92px;
+  transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 32px));
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  border-radius: 999px;
+  padding: 12px 18px;
+  background: rgba(255, 255, 255, 0.86);
+  color: var(--text);
+  box-shadow: 0 18px 50px rgba(36, 31, 24, 0.12);
+  backdrop-filter: blur(20px);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.card-panel {
+  position: fixed;
+  z-index: 12;
+  top: 28px;
+  right: 28px;
+  width: min(420px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  border-radius: 28px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 24px 80px rgba(36, 31, 24, 0.16);
+  backdrop-filter: blur(24px);
+}
+
+.card-panel-head,
+.card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-panel-head {
+  margin-bottom: 14px;
+}
+
+.card-panel-head h2 {
+  font-size: 22px;
+}
+
+.card-preview {
+  display: grid;
+  justify-items: center;
+}
+
+.ritual-card {
+  position: relative;
+  width: min(420px, 100%);
+  max-width: 420px;
+  min-height: 440px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+  overflow: hidden;
+  border-radius: 24px;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(255, 255, 255, 0.76), transparent 28%),
+    linear-gradient(145deg, #fbf4ed, #ece8df 58%, #dfe5e6);
+  color: #28241f;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
+.ritual-card.card-compact {
+  min-height: 360px;
+}
+
+.ritual-card.card-standard {
+  min-height: 440px;
+}
+
+.ritual-card.card-tall {
+  min-height: 540px;
+}
+
+.card-art {
+  position: absolute;
+  inset: 0;
+  color: rgba(155, 115, 85, 0.75);
+  pointer-events: none;
+}
+
+.card-art svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.card-content {
+  position: relative;
+  z-index: 1;
+  min-height: 384px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 18px;
+}
+
+.card-compact .card-content {
+  min-height: 304px;
+}
+
+.card-tall .card-content {
+  min-height: 484px;
+}
+
+.ritual-card.echo,
+.ritual-card.art-ripple {
+  background:
+    radial-gradient(circle at 76% 12%, rgba(255, 255, 255, 0.5), transparent 30%),
+    linear-gradient(145deg, #f8f3ec, #eee9df 58%, #e6e5dc);
+}
+
+.ritual-card.art-ripple .card-art {
+  color: rgba(116, 96, 78, 0.52);
+}
+
+.ritual-card.art-fold .card-art {
+  color: rgba(88, 80, 72, 0.45);
+}
+
+.ritual-card.art-stardust .card-art {
+  color: rgba(98, 86, 70, 0.62);
+}
+
+.ritual-card.finish {
+  background:
+    radial-gradient(circle at 20% 18%, rgba(217, 121, 92, 0.18), transparent 28%),
+    linear-gradient(145deg, #fbf6ee, #eeece4 60%, #e4e8df);
+}
+
+.ritual-card.quiet {
+  background:
+    radial-gradient(circle at 72% 18%, rgba(255, 255, 255, 0.76), transparent 32%),
+    linear-gradient(145deg, #f8f5ef, #eeeae2 62%, #e8e6df);
+}
+
+.card-kicker {
+  margin: 0;
+  color: #7d7971;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.ritual-card h3 {
+  margin: 0;
+  font-size: 34px;
+  line-height: 1.05;
+  letter-spacing: 0;
+}
+
+.card-subtitle {
+  margin: -8px 0 0;
+  color: #868178;
+  font-size: 14px;
+}
+
+.ritual-card blockquote {
+  margin: clamp(22px, 7vh, 64px) 0 0;
+  padding: 0;
+  color: #34302b;
+  font-family: Georgia, "Times New Roman", "Songti SC", serif;
+  font-size: 24px;
+  line-height: 1.45;
+}
+
+.card-voices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.card-voices,
+.ritual-card footer {
+  margin-top: auto;
+}
+
+.card-voices.single {
+  grid-template-columns: 1fr;
+}
+
+.card-voices section {
+  min-width: 0;
+  border-top: 1px solid rgba(40, 36, 31, 0.14);
+  padding-top: 10px;
+}
+
+.card-voices span {
+  color: #817b72;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.card-voices p,
+.ritual-card footer {
+  margin: 6px 0 0;
+  color: #4b463f;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.ritual-card footer {
+  color: #817b72;
+}
+
+.card-actions {
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .note-form {
@@ -463,11 +709,37 @@ button:disabled {
     right: 16px;
   }
 
+  .card-panel {
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    width: auto;
+    max-height: calc(100vh - 128px);
+  }
+
+  .ritual-card {
+    width: min(420px, 100%);
+    min-height: 460px;
+    padding: 24px;
+  }
+
+  .ritual-card h3 {
+    font-size: 30px;
+  }
+
+  .ritual-card blockquote {
+    font-size: 22px;
+  }
+
   .submitbar {
     align-items: stretch;
     flex-direction: column;
     z-index: 9;
     padding-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+
+  .toast {
+    bottom: calc(124px + env(safe-area-inset-bottom));
   }
 
   .submit-actions {
@@ -497,6 +769,7 @@ button:disabled {
     --muted: #aaa29a;
     --line: rgba(255, 255, 255, 0.1);
     --accent-soft: rgba(217, 121, 92, 0.22);
+    --blue-soft: rgba(132, 169, 207, 0.2);
     --shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
   }
 
@@ -505,7 +778,9 @@ button:disabled {
   }
 
   .note-form,
-  .submitbar {
+  .submitbar,
+  .card-panel,
+  .toast {
     border-color: rgba(255, 255, 255, 0.14);
     background: rgba(28, 27, 26, 0.78);
   }

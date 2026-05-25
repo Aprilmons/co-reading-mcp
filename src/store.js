@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { buildCardCandidates, pickCard } from "../public/card-logic.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -12,6 +13,7 @@ export const dataDir = process.env.READING_MCP_DATA_DIR
 const booksDir = path.join(dataDir, "books");
 const annotationsPath = path.join(dataDir, "annotations.jsonl");
 const submissionsPath = path.join(dataDir, "submissions.jsonl");
+const cardsPath = path.join(dataDir, "cards.jsonl");
 const progressPath = path.join(dataDir, "progress.json");
 const sessionsPath = path.join(dataDir, "reading_sessions.json");
 
@@ -136,6 +138,102 @@ const finishCelebrations = [
 
 function finishCelebrationFor() {
   return finishCelebrations[crypto.randomInt(finishCelebrations.length)];
+}
+
+function chunkSegment(manifest, targetChunk) {
+  const chunks = sortedChunks(manifest);
+  const index = chunks.findIndex((chunk) => chunk.id === targetChunk.id);
+  const sectionTitle = targetChunk.sectionTitle || null;
+  if (sectionTitle) {
+    const sectionChunks = chunks.filter((chunk) => chunk.sectionTitle === sectionTitle);
+    return {
+      key: `section:${sectionTitle}`,
+      title: sectionTitle,
+      chunks: sectionChunks,
+    };
+  }
+
+  const bucketSize = 3;
+  const bucketIndex = Math.max(Math.floor(Math.max(index, 0) / bucketSize), 0);
+  const bucketChunks = chunks.slice(bucketIndex * bucketSize, bucketIndex * bucketSize + bucketSize);
+  return {
+    key: `bucket:${bucketIndex}`,
+    title: targetChunk.title,
+    chunks: bucketChunks,
+  };
+}
+
+function noteFromCandidate(candidate) {
+  const parts = [];
+  if (candidate.leftLabel && candidate.leftText) {
+    parts.push(`${candidate.leftLabel}: ${candidate.leftText}`);
+  }
+  if (candidate.rightLabel && candidate.rightText) {
+    parts.push(`${candidate.rightLabel}: ${candidate.rightText}`);
+  }
+  if (!parts.length && candidate.note) parts.push(candidate.note);
+  return parts.join("\n") || candidate.footer || "A small card from the margin.";
+}
+
+async function maybeCollectSectionCard({ manifest, targetChunk, progressEntry, finish = null }) {
+  const segment = chunkSegment(manifest, targetChunk);
+  const readIds = validReadIds(manifest, progressEntry);
+  const segmentComplete = segment.chunks.length > 0 && segment.chunks.every((chunk) => readIds.has(chunk.id));
+  if (!segmentComplete && !finish) return null;
+
+  const segmentKey = `${manifest.bookId}:${segment.key}`;
+  const existing = (await readAllCards()).find(
+    (card) => card.bookId === manifest.bookId && card.context?.segmentKey === segmentKey,
+  );
+  if (existing) return cardSummary(existing);
+
+  const segmentIds = new Set(segment.chunks.map((chunk) => chunk.id));
+  const annotations = (await readAllAnnotations()).filter(
+    (annotation) => annotation.bookId === manifest.bookId && segmentIds.has(annotation.chunkId),
+  );
+  const chunk = await readChunk(manifest.bookId, targetChunk.id);
+  const candidate = pickCard(
+    buildCardCandidates({
+      book: manifest,
+      chunk: { ...targetChunk, text: chunk.text },
+      annotations,
+      finish,
+    }),
+    `${manifest.bookId}:${segment.key}`.split("").reduce((sum, char) => sum + char.charCodeAt(0), 0),
+  );
+  if (!candidate) return null;
+
+  const now = new Date().toISOString();
+  const card = {
+    id: `card_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+    bookId: manifest.bookId,
+    chunkId: targetChunk.id,
+    bookTitle: manifest.title,
+    chunkTitle: targetChunk.title,
+    title: candidate.title || manifest.title || "Reading card",
+    subtitle: candidate.subtitle || [manifest.title, segment.title].filter(Boolean).join(" · "),
+    kicker: candidate.kicker || "收获了一枚回声书签",
+    quote: candidate.quote || "",
+    note: noteFromCandidate(candidate),
+    footer: candidate.footer || "A small card from the margin.",
+    art: candidate.art || "fold",
+    artSeed: candidate.artSeed,
+    variant: candidate.variant || "quiet",
+    source: "section-complete",
+    candidateSource: candidate.source || null,
+    createdBy: "system",
+    createdAt: now,
+    status: "new",
+    context: {
+      segmentKey,
+      segmentTitle: segment.title,
+      segmentChunkIds: Array.from(segmentIds),
+      trigger: finish ? "book-complete" : "section-complete",
+    },
+  };
+  await mkdir(dataDir, { recursive: true });
+  await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+  return cardSummary(card);
 }
 
 export async function loadManifest(bookId) {
@@ -512,11 +610,33 @@ export async function markRead(bookId, chunkId) {
       const celebration = finishCelebrationFor();
       result.finish = {
         annotationCount: annotations.length,
+        chunksRead: summary.chunksRead,
+        chunkCount: summary.chunkCount,
         moodCounts,
         kindCounts,
         celebration,
         message: `Congratulations, ${manifest.title} is complete: ${summary.chunkCount}/${summary.chunkCount} chunks, ${annotations.length} annotations.`,
       };
+    }
+
+    const collectedCard = await maybeCollectSectionCard({
+      manifest,
+      targetChunk,
+      progressEntry: progress[bookId],
+      finish: result.finish || null,
+    });
+    if (collectedCard) {
+      result.collectedCard = {
+        id: collectedCard.id,
+        message: collectedCard.kicker || "收获了一枚回声书签",
+        title: collectedCard.title,
+        subtitle: collectedCard.subtitle,
+      };
+    }
+
+    const cardNotification = await latestCardNotification({ bookId });
+    if (cardNotification) {
+      result.cardNotification = cardNotification;
     }
 
     return result;
@@ -558,6 +678,149 @@ async function readJsonl(filePath) {
 
 async function readAllSubmissions() {
   return readJsonl(submissionsPath);
+}
+
+async function readAllCards() {
+  return readJsonl(cardsPath);
+}
+
+function cardSummary(card) {
+  const { context, ...summary } = card;
+  return summary;
+}
+
+export async function listCards({ bookId, chunkId, source, limit = 20, offset = 0 } = {}) {
+  const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const start = Math.max(Number(offset) || 0, 0);
+  return (await readAllCards())
+    .filter((card) => !bookId || card.bookId === bookId)
+    .filter((card) => !chunkId || card.chunkId === chunkId)
+    .filter((card) => !source || card.source === source)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+    .slice(start, start + max)
+    .map(cardSummary);
+}
+
+export async function listCardInbox({ bookId, limit = 10 } = {}) {
+  return (await listCards({ bookId, limit }))
+    .filter((card) => (card.status || "new") !== "dismissed")
+    .map((card) => ({
+      id: card.id,
+      message: card.kicker || "收获了一枚回声书签",
+      title: card.title || card.bookTitle || "Reading card",
+      subtitle: card.subtitle || [card.bookTitle, card.chunkTitle].filter(Boolean).join(" · "),
+      createdAt: card.createdAt,
+      hint: "Open with reading_open_card, or dismiss with reading_dismiss_card.",
+    }));
+}
+
+export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}) {
+  const max = Math.min(Math.max(Number(limit) || 12, 1), 50);
+  const start = Math.max(Number(offset) || 0, 0);
+  const all = await listCards({ bookId, limit: 10_000, offset: 0 });
+  const items = all.slice(start, start + max).map((card) => ({
+    id: card.id,
+    title: card.title || card.bookTitle || "Reading card",
+    subtitle: card.subtitle || [card.bookTitle, card.chunkTitle].filter(Boolean).join(" · "),
+    kicker: card.kicker || "收获了一枚回声书签",
+    art: card.art || "fold",
+    status: card.status || "new",
+    createdAt: card.createdAt,
+    hint: "Open with reading_open_card when you want to view the card image.",
+  }));
+  return {
+    offset: start,
+    limit: max,
+    total: all.length,
+    nextOffset: start + max < all.length ? start + max : null,
+    items,
+  };
+}
+
+export async function latestCardNotification({ bookId } = {}) {
+  const inbox = await listCardInbox({ bookId, limit: 1 });
+  const card = inbox[0] || (bookId ? (await listCardInbox({ limit: 1 }))[0] : null);
+  if (!card) return null;
+  return {
+    message: card.message || "收获了一枚回声书签",
+    cardId: card.id,
+    title: card.title,
+    subtitle: card.subtitle,
+    actions: {
+      open: `reading_open_card({ cardId: "${card.id}" })`,
+      dismiss: `reading_dismiss_card({ cardId: "${card.id}" })`,
+    },
+  };
+}
+
+export async function readCard(cardId) {
+  if (!cardId) throw new Error("cardId is required");
+  const card = (await readAllCards()).find((item) => item.id === cardId);
+  if (!card) throw new Error(`Unknown cardId: ${cardId}`);
+  return card;
+}
+
+export async function dismissCard(cardId) {
+  if (!cardId) throw new Error("cardId is required");
+  return withWriteLock(async () => {
+    const cards = await readAllCards();
+    let found = null;
+    const dismissedAt = new Date().toISOString();
+    const updated = cards.map((card) => {
+      if (card.id !== cardId) return card;
+      found = { ...card, status: "dismissed", dismissedAt };
+      return found;
+    });
+    if (!found) throw new Error(`Unknown cardId: ${cardId}`);
+    await writeJsonl(cardsPath, updated);
+    return {
+      id: found.id,
+      status: found.status,
+      dismissedAt,
+      message: `Dismissed reading card ${found.id}.`,
+    };
+  });
+}
+
+export async function collectCard(input = {}) {
+  return withWriteLock(async () => {
+    const { bookId, chunkId } = input;
+    let chunk = null;
+    if (bookId && chunkId) {
+      chunk = await readChunk(bookId, chunkId);
+    }
+
+    const now = new Date().toISOString();
+    const title = input.title || chunk?.title || chunk?.chunk?.title || input.bookTitle || "Reading card";
+    const card = {
+      id: `card_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+      bookId: bookId || null,
+      chunkId: chunkId || null,
+      bookTitle: input.bookTitle || chunk?.title || null,
+      chunkTitle: input.chunkTitle || chunk?.chunk?.title || null,
+      title,
+      subtitle: input.subtitle || [input.bookTitle || chunk?.title, input.chunkTitle || chunk?.chunk?.title]
+        .filter(Boolean)
+        .join(" · "),
+      kicker: input.kicker || "收获了一枚回声书签",
+      quote: input.quote || "",
+      note: input.note || "",
+      footer: input.footer || "A small card from the margin.",
+      art: input.art || "fold",
+      variant: input.variant || "quiet",
+      source: input.source || "manual",
+      createdBy: input.createdBy || "human",
+      createdAt: now,
+      context: input.context || null,
+    };
+
+    await mkdir(dataDir, { recursive: true });
+    await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
+    return {
+      ...cardSummary(card),
+      message: `Collected reading card ${card.id}: ${card.kicker}`,
+    };
+  });
 }
 
 export async function listAnnotations({ bookId, chunkId, kind, author, status, parentId, includePrivate = false } = {}) {

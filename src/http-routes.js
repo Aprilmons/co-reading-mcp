@@ -3,18 +3,25 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   annotatePassage,
+  collectCard,
   continueReading,
+  dismissCard,
   getProgress,
+  listCardInbox,
+  listCardCollection,
+  listCards,
   listAnnotations,
   listBooks,
   listChunks,
   markRead,
+  readCard,
   readChunk,
   replyToAnnotation,
   searchChunks,
   submitUserNotes,
 } from "./store.js";
 import { importBook } from "./importer.js";
+import { renderCardSvg } from "./card-renderer.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const publicDir = path.join(ROOT, "public");
@@ -93,6 +100,59 @@ export async function handleApi(req, res, url, options = {}) {
         includePrivate: true,
       }),
     );
+  }
+
+  if (req.method === "GET" && parts.length === 2 && parts[1] === "cards") {
+    return sendJson(
+      res,
+      200,
+      await listCards({
+        bookId: url.searchParams.get("bookId") || undefined,
+        chunkId: url.searchParams.get("chunkId") || undefined,
+        source: url.searchParams.get("source") || undefined,
+        limit: Number(url.searchParams.get("limit") || 20),
+        offset: Number(url.searchParams.get("offset") || 0),
+      }),
+    );
+  }
+
+  if (req.method === "GET" && parts.length === 2 && parts[1] === "card-collection") {
+    return sendJson(
+      res,
+      200,
+      await listCardCollection({
+        bookId: url.searchParams.get("bookId") || undefined,
+        limit: Number(url.searchParams.get("limit") || 12),
+        offset: Number(url.searchParams.get("offset") || 0),
+      }),
+    );
+  }
+
+  if (req.method === "GET" && parts.length === 2 && parts[1] === "card-inbox") {
+    return sendJson(
+      res,
+      200,
+      await listCardInbox({
+        bookId: url.searchParams.get("bookId") || undefined,
+        limit: Number(url.searchParams.get("limit") || 10),
+      }),
+    );
+  }
+
+  if (req.method === "GET" && parts.length === 4 && parts[1] === "cards" && parts[3] === "image.svg") {
+    const card = await readCard(parts[2]);
+    res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8" });
+    res.end(renderCardSvg(card));
+    return;
+  }
+
+  if (req.method === "POST" && parts.length === 4 && parts[1] === "cards" && parts[3] === "dismiss") {
+    return sendJson(res, 200, await dismissCard(parts[2]));
+  }
+
+  if (req.method === "POST" && parts.length === 2 && parts[1] === "cards") {
+    const body = await readBody(req, { maxBytes });
+    return sendJson(res, 201, await collectCard({ ...body, createdBy: body.createdBy || "human" }));
   }
 
   if (req.method === "POST" && parts.length === 2 && parts[1] === "annotations") {
