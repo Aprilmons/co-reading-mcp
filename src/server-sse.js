@@ -13,7 +13,8 @@ const corsOrigin = process.env.MCP_CORS_ORIGIN || "*";
 const maxBodyBytes = Number(process.env.MCP_MAX_BODY_BYTES || process.env.READING_IMPORT_MAX_BYTES || 25_000_000);
 const sessions = new Map();
 const authCookieName = "co_reading_token";
-const protocolVersion = "2024-11-05";
+const protocolVersion = "2025-03-26";
+const mcpSessions = new Map(); // sessionId -> { createdAt }
 
 function sendSse(res, event, data) {
   res.write(`event: ${event}\n`);
@@ -23,8 +24,8 @@ function sendSse(res, event, data) {
 function setCors(res) {
   res.setHeader("access-control-allow-origin", corsOrigin);
   res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
-  res.setHeader("access-control-allow-headers", "content-type, authorization, mcp-protocol-version");
-  res.setHeader("access-control-expose-headers", "mcp-protocol-version, www-authenticate");
+  res.setHeader("access-control-allow-headers", "content-type, authorization, mcp-protocol-version, mcp-session-id");
+  res.setHeader("access-control-expose-headers", "mcp-protocol-version, mcp-session-id, www-authenticate");
 }
 
 function cookieToken(req) {
@@ -145,9 +146,35 @@ async function route(req, res) {
       return;
     }
 
+    const isInitialize = message?.method === "initialize";
+    const isNotification = message?.method?.startsWith("notifications/");
+    const incomingSessionId = req.headers["mcp-session-id"];
+
+    // Validate session for non-initialize requests
+    if (!isInitialize && !isNotification && incomingSessionId && !mcpSessions.has(incomingSessionId)) {
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "Session not found" }));
+      return;
+    }
+
     try {
       const response = await handle(message);
-      sendMcpJson(res, 200, response || { accepted: true });
+      if (isInitialize && response) {
+        // Create session and return Mcp-Session-Id header
+        const sessionId = crypto.randomUUID();
+        mcpSessions.set(sessionId, { createdAt: Date.now() });
+        res.writeHead(200, {
+          "content-type": "application/json; charset=utf-8",
+          "mcp-protocol-version": protocolVersion,
+          "mcp-session-id": sessionId,
+        });
+        res.end(JSON.stringify(response, null, 2));
+      } else if (isNotification) {
+        res.writeHead(204);
+        res.end();
+      } else {
+        sendMcpJson(res, 200, response || { accepted: true });
+      }
     } catch (error) {
       sendMcpJson(res, 200, rpcError(message?.id ?? null, -32000, error.message || String(error)));
     }
@@ -155,12 +182,31 @@ async function route(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/mcp") {
-    res.writeHead(405, {
-      allow: "POST",
-      "content-type": "application/json; charset=utf-8",
-      "mcp-protocol-version": protocolVersion,
+    // Streamable HTTP: GET /mcp opens SSE stream for server-initiated notifications
+    const incomingSessionId = req.headers["mcp-session-id"];
+    if (!incomingSessionId || !mcpSessions.has(incomingSessionId)) {
+      res.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: "Session not found" }));
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      "connection": "keep-alive",
+      "x-accel-buffering": "no",
+      "mcp-session-id": incomingSessionId,
     });
-    res.end(JSON.stringify({ error: "Method Not Allowed", expected: "POST JSON-RPC" }, null, 2));
+    res.write(": connected\n\n");
+    const keepAlive = setInterval(() => res.write(": ping\n\n"), 30_000);
+    req.on("close", () => clearInterval(keepAlive));
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/mcp") {
+    const incomingSessionId = req.headers["mcp-session-id"];
+    if (incomingSessionId) mcpSessions.delete(incomingSessionId);
+    res.writeHead(204);
+    res.end();
     return;
   }
 

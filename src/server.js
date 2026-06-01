@@ -34,7 +34,7 @@ import {
 } from "./importer.js";
 import { renderCardImageContent, saveCardImage } from "./card-renderer.js";
 
-const protocolVersion = "2024-11-05";
+const protocolVersion = "2025-03-26";
 
 export const tools = [
   {
