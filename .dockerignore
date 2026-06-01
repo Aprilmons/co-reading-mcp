@@ -1,0 +1,9 @@
+node_modules
+data
+data.example
+docs
+scripts
+.git
+.gitignore
+README.md
+LICENSE
