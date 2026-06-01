@@ -138,6 +138,10 @@ async function route(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/mcp") {
+    const accept = req.headers.accept || "";
+    const wantsSse = accept.includes("text/event-stream");
+    process.stderr.write(`[MCP POST] accept=${accept} wantsSse=${wantsSse}\n`);
+
     let message;
     try {
       message = await readBody(req, { maxBytes: maxBodyBytes, allowEmpty: false });
@@ -145,6 +149,8 @@ async function route(req, res) {
       sendMcpJson(res, 400, { error: error.message || "Invalid JSON body" });
       return;
     }
+
+    process.stderr.write(`[MCP POST] method=${message?.method} id=${message?.id}\n`);
 
     const isInitialize = message?.method === "initialize";
     const isNotification = message?.method?.startsWith("notifications/");
@@ -159,21 +165,38 @@ async function route(req, res) {
 
     try {
       const response = await handle(message);
-      if (isInitialize && response) {
-        // Create session and return Mcp-Session-Id header
-        const sessionId = crypto.randomUUID();
-        mcpSessions.set(sessionId, { createdAt: Date.now() });
-        res.writeHead(200, {
-          "content-type": "application/json; charset=utf-8",
-          "mcp-protocol-version": protocolVersion,
-          "mcp-session-id": sessionId,
-        });
-        res.end(JSON.stringify(response, null, 2));
-      } else if (isNotification) {
+
+      if (isNotification) {
         res.writeHead(204);
         res.end();
+        return;
+      }
+
+      const sessionId = isInitialize ? crypto.randomUUID() : (incomingSessionId || undefined);
+      if (isInitialize) mcpSessions.set(sessionId, { createdAt: Date.now() });
+
+      const headers = {
+        "mcp-protocol-version": protocolVersion,
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      };
+
+      if (wantsSse) {
+        // Respond as SSE stream (Streamable HTTP spec)
+        res.writeHead(200, {
+          ...headers,
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          "connection": "keep-alive",
+          "x-accel-buffering": "no",
+        });
+        if (response) {
+          res.write(`event: message\ndata: ${JSON.stringify(response)}\n\n`);
+        }
+        res.end();
       } else {
-        sendMcpJson(res, 200, response || { accepted: true });
+        // Respond as plain JSON
+        res.writeHead(200, { ...headers, "content-type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(response || { accepted: true }, null, 2));
       }
     } catch (error) {
       sendMcpJson(res, 200, rpcError(message?.id ?? null, -32000, error.message || String(error)));
