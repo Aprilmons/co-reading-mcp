@@ -1,6 +1,6 @@
 {
   "name": "co-reading-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local co-reading MCP server for chunked books, reading progress, search, and margin annotations.",
   "type": "module",
   "author": "GPT, Claude, and Koshi",
@@ -22,6 +22,7 @@
     "co-reading-sse": "./src/server-sse.js"
   },
   "scripts": {
+    "test": "node --test scripts/*.test.mjs",
     "start": "node src/server.js",
     "reader": "node src/http.js",
     "start:sse": "node src/server-sse.js",

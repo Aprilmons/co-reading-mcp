@@ -323,6 +323,7 @@ const markImportFirst = await request("tools/call", {
 const importResonance = await request("tools/call", {
   name: "reading_annotate_passage",
   arguments: {
+    author: "test-assistant",
     bookId: "mcp-import",
     chunkId: "ch01",
     quote: "Beta imported from a single MCP base64 payload.",
@@ -438,7 +439,7 @@ const secondSubmit = await request("tools/call", {
 });
 const reply = await request("tools/call", {
   name: "reading_reply_to_annotation",
-  arguments: { parentId: "ann_guidelines_user_001", note: "Claude can answer in the margin." },
+  arguments: { parentId: "ann_guidelines_user_001", note: "Claude can answer in the margin.", author: "claude" },
 });
 const replies = await request("tools/call", {
   name: "reading_list_annotations",
@@ -791,11 +792,11 @@ if (!contentJson(visibleAfterSubmit).some((note) => note.id === "ann_guidelines_
 if (!contentJson(firstSubmit).context.chunks[0]?.text.includes("Claude and the mission of Anthropic")) {
   throw new Error("first session submit did not include chunk text");
 }
-if (contentJson(mcpSpoofNote).author !== "claude" || contentJson(mcpSpoofNote).status !== "published") {
-  throw new Error("reading_annotate_passage allowed MCP to spoof a private human note");
+if (!mcpSpoofNote.error) {
+  throw new Error("reading_annotate_passage did not reject a spoofed human author");
 }
-if (!contentJson(mcpSpoofNote).annotationIndexInBook || !contentJson(mcpSpoofNote).message.includes("Saved annotation")) {
-  throw new Error("reading_annotate_passage did not return annotation index feedback");
+if (contentJson(importResonance).author !== "test-assistant" || contentJson(importResonance).role !== "assistant") {
+  throw new Error("reading_annotate_passage did not preserve the explicit assistant identity");
 }
 if (contentJson(sameSessionSubmit).context.chunks.length !== 0) {
   throw new Error("same-session submit repeated chunk text");
@@ -899,8 +900,8 @@ if (!sseMetadata.ok || (await sseMetadata.json()).resource !== `http://127.0.0.1
 if (!sseApiBooks.some((book) => book.bookId === "anthropic-guidelines")) {
   throw new Error("SSE process did not serve authenticated REST API");
 }
-if (sseMcpGet.status !== 405 || sseMcpGet.headers.get("allow") !== "POST") {
-  throw new Error("SSE process did not return a connector-friendly GET /mcp response");
+if (sseMcpGet.status !== 404 || (await sseMcpGet.json()).error !== "Session not found") {
+  throw new Error("Streamable HTTP GET /mcp did not reject the missing session");
 }
 if (!sseMcpPost.ok || sseMcpMessage.result?.serverInfo?.name !== "co-reading-mcp") {
   throw new Error("SSE process did not serve MCP JSON-RPC POST endpoint");

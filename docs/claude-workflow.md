@@ -2,6 +2,12 @@
 
 This is the intended agent loop.
 
+After upgrading to 0.2.0, reconnect or refresh the MCP client to load the new
+required `author` argument on annotation/reply tools. Claude supplies `"claude"`;
+other assistants must supply their own actual identity. Missing identity fails
+explicitly, and historical Claude notes are not relabeled. Follow the human's
+instructions about saving notes; the server does not grant automatic write consent.
+
 ## Start a Book
 
 1. Call `reading_list_books`.
@@ -32,6 +38,8 @@ Example:
 ```json
 {
   "bookId": "anthropic-guidelines",
+  "author": "claude",
+  "displayName": "Claude",
   "chunkId": "ch00",
   "quote": "this line matters because I found myself in it",
   "note": "This is not a summary. It is a resonance marker.",
@@ -53,7 +61,14 @@ The system is bidirectional. A companion reading UI can let the user mark passag
 
 Open/private/draft user notes are intentionally hidden from Claude-facing `reading_list_annotations` results. The human can save them and leave the reader without sharing them.
 
-When the user taps a “Send to Claude” button, call `reading_submit_user_notes` with the current Claude session id:
+The newer [Reader Notes API](reader-notes-contract.md) saves explicit private notes
+and shares individual notes. `reading_submit_user_notes` never publishes explicit
+private notes. Shared notes can be read repeatedly by every connected partner.
+`reading_read_chunk` and `reading_continue` include current shared notes in their
+`annotations` field; each record preserves its source author.
+
+For legacy open/draft staging only, when the user taps a “Send to Claude” button,
+call `reading_submit_user_notes` with the current Claude session id:
 
 ```json
 {
@@ -73,6 +88,7 @@ Claude can then answer under a user note:
 ```json
 {
   "parentId": "ann_user_...",
+  "author": "claude",
   "note": "Claude's reply in the margin.",
   "kind": "reply"
 }

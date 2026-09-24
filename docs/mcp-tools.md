@@ -1,5 +1,12 @@
 # MCP Tools
 
+Version 0.2.0 requires a tool-schema refresh/reconnection after upgrade.
+`reading_annotate_passage` and `reading_reply_to_annotation` require the caller's
+truthful `author` (for example `codex` or `claude`); `displayName` is optional.
+These tools always create shared assistant records, never human notes. Cached old
+tools without author return `identity_required`. Existing records are unchanged.
+See [Reader Notes v1](reader-notes-contract.md) for human writing and visibility.
+
 ## `reading_list_books`
 
 Returns all imported books with progress and annotation counts. Annotation counts are cached by `annotations.jsonl` file signature so repeated calls do not re-parse the JSONL file unless it changes.
@@ -22,7 +29,9 @@ Input:
 { "bookId": "anthropic-guidelines", "chunkId": "ch00" }
 ```
 
-Returns the chunk text plus neighboring ids.
+Returns the chunk text plus neighboring ids and `annotations`, the current shared
+notes/replies for that chunk. Private notes and descendants are excluded. This
+read does not mark the passage read or consume shared notes.
 
 ## `reading_continue`
 
@@ -140,15 +149,17 @@ Input:
   "author": "claude",
   "kind": "resonance",
   "mood": "quiet",
-  "tags": ["identity"],
-  "status": "published",
-  "parentId": null
+  "tags": ["identity"]
 }
 ```
 
-Writes one JSONL annotation. If the quote is present in the chunk, the returned object includes a `quoteOffset`. Root annotations also return `annotationIndexInBook`, `annotationIndexInChunk`, and a short `message` such as “Saved annotation 12 in this book.”
+Writes one shared assistant annotation. If the quote is present in the chunk, the
+returned object includes a `quoteOffset`. MCP responses omit ordinal counts that
+could reveal private notes. Author role and published status are fixed by the
+server; do not pass `status`, `role`, or `visibility` to an assistant tool.
 
-For a user-facing reading app, create user notes with:
+For the legacy user-facing HTTP API only, create staged notes with the following
+payload. New clients should use the precise [Reader Notes API](reader-notes-contract.md):
 
 ```json
 {
@@ -228,12 +239,16 @@ Input:
 ```json
 {
   "parentId": "ann_guidelines_user_001",
+  "author": "claude",
   "note": "Claude's reply under this user note.",
   "kind": "reply"
 }
 ```
 
-Creates a Claude annotation with `parentId` pointing to the original note. If `bookId`, `chunkId`, or `quote` are omitted, they are inherited from the parent annotation.
+Creates an explicitly signed assistant annotation with `parentId` pointing to a
+currently shared note. If `bookId`, `chunkId`, or `quote` are omitted, they are
+inherited from the parent, including its exact selected occurrence. Private
+parents are unavailable to this tool.
 
 ## `reading_mark_read`
 

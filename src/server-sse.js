@@ -23,7 +23,7 @@ function sendSse(res, event, data) {
 
 function setCors(res) {
   res.setHeader("access-control-allow-origin", corsOrigin);
-  res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS");
   res.setHeader("access-control-allow-headers", "content-type, authorization, mcp-protocol-version, mcp-session-id");
   res.setHeader("access-control-expose-headers", "mcp-protocol-version, mcp-session-id, www-authenticate");
 }

@@ -1,5 +1,28 @@
 # Co-Reading MCP
 
+## Reader Notes v1 (0.2.0)
+
+The authenticated reader API now supports precise text selections, private/shared
+human notes, editing with revision conflicts, and idempotent retries. See
+[the Reader Notes contract](docs/reader-notes-contract.md) for endpoints and limits.
+The existing array-shaped read APIs remain compatible.
+
+MCP `reading_read_chunk` and `reading_continue` include the current shared notes
+for that passage. Notes remain available to every connected reading partner;
+reading is not a destructive inbox operation. Explicit private notes and private
+threads are excluded from assistant reads, historical submission views, and
+note-derived cards. Switching back to private cannot erase copies already read.
+
+After upgrading, **refresh or reconnect each MCP client to reload tool schemas**.
+`reading_annotate_passage` and `reading_reply_to_annotation` now require `author`
+(for example `codex` or `claude`) and optionally `displayName`. Cached old tools
+without identity receive an `identity_required` error; new notes are never silently
+attributed to Claude. Existing Claude records are unchanged. Identity is asserted
+by the caller, not independently verified by the server.
+
+Each assistant should follow its user's current instructions about when to save
+notes. Installing this server does not authorize automatic saving for every user.
+
 A local MCP server that gives Claude a durable reading room:
 
 - import EPUB or plain text into stable chunks while preserving EPUB spine/chapter boundaries
