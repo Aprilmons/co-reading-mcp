@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   annotatePassage,
+  assistantAnnotation,
   collectCard,
   continueReading,
   dataDir,
@@ -195,11 +196,13 @@ export const tools = [
   },
   {
     name: "reading_annotate_passage",
-    description: "Write a Claude margin annotation anchored to a quote in a chunk. Human private notes should be created through the HTTP reader API, not this MCP tool.",
+    description: "Write a shared assistant margin annotation with an explicit truthful author. Human private notes belong to the HTTP reader API.",
     inputSchema: {
       type: "object",
-      required: ["bookId", "chunkId", "quote", "note"],
+      required: ["bookId", "chunkId", "quote", "note", "author"],
       properties: {
+        author: { type: "string", description: "Your actual assistant identity, e.g. codex or claude. Never impersonate another author." },
+        displayName: { type: "string" },
         bookId: { type: "string" },
         chunkId: { type: "string" },
         quote: { type: "string" },
@@ -233,7 +236,7 @@ export const tools = [
   {
     name: "reading_submit_user_notes",
     description:
-      "Submit open user notes for Claude review. By default, include each chunk's full text once per session and mark notes submitted so they are not sent again.",
+      "Share legacy staged open/draft user notes. Explicit private notes are never submitted. Shared notes remain readable by every connected partner; session IDs only deduplicate chapter context.",
     inputSchema: {
       type: "object",
       properties: {
@@ -253,7 +256,7 @@ export const tools = [
   },
   {
     name: "reading_list_submissions",
-    description: "List human note submission batches that have been shared with Claude.",
+    description: "List shared human note batches, filtered against current note visibility.",
     inputSchema: {
       type: "object",
       properties: {
@@ -279,11 +282,13 @@ export const tools = [
   },
   {
     name: "reading_reply_to_annotation",
-    description: "Attach a Claude reply under an existing user or Claude annotation.",
+    description: "Attach a shared assistant reply to a currently shared annotation, with an explicit truthful author.",
     inputSchema: {
       type: "object",
-      required: ["parentId", "note"],
+      required: ["parentId", "note", "author"],
       properties: {
+        author: { type: "string", description: "Your actual assistant identity, e.g. codex or claude." },
+        displayName: { type: "string" },
         parentId: { type: "string" },
         note: { type: "string" },
         kind: { type: "string" },
@@ -449,6 +454,24 @@ function imageContent({ text, image }) {
   };
 }
 
+function assistantInput(args) {
+  if (typeof args.author !== "string" || !args.author.trim()) throw new Error("identity_required: supply your actual assistant author identity");
+  const author = args.author.trim();
+  if (author.length > 80 || /[\u0000-\u001f]/u.test(author) || ["user", "human", "koshi", "you"].includes(author.toLowerCase())) {
+    throw new Error("invalid_identity: assistant author cannot impersonate the reader");
+  }
+  if (["role", "status", "visibility", "includePrivate"].some((key) => Object.hasOwn(args, key))) throw new Error("Unexpected assistant identity or visibility fields");
+  if (args.displayName !== undefined && (typeof args.displayName !== "string" || !args.displayName.trim() || args.displayName.length > 80)) throw new Error("Invalid displayName");
+  if (typeof args.note !== "string" || !args.note.trim() || args.note.length > 20000) throw new Error("Note must contain 1–20000 UTF-16 units");
+  if (args.quote !== undefined && (typeof args.quote !== "string" || !args.quote.trim() || args.quote.length > 12000)) throw new Error("Quote must contain 1–12000 UTF-16 units");
+  return { ...args, author, displayName: args.displayName?.trim() || author, role: "assistant", status: "published" };
+}
+
+async function withSharedAnnotations(chunk) {
+  if (!chunk.chunk?.id) return chunk;
+  return { ...chunk, annotations: await listAnnotations({ bookId: chunk.bookId, chunkId: chunk.chunk.id, includePrivate: false }) };
+}
+
 export async function callTool(name, args = {}) {
   switch (name) {
     case "reading_list_books":
@@ -456,9 +479,9 @@ export async function callTool(name, args = {}) {
     case "reading_list_chunks":
       return textContent(await listChunks(args.bookId));
     case "reading_read_chunk":
-      return textContent(await readChunk(args.bookId, args.chunkId));
+      return textContent(await withSharedAnnotations(await readChunk(args.bookId, args.chunkId)));
     case "reading_continue":
-      return textContent(await continueReading(args));
+      return textContent(await withSharedAnnotations(await continueReading(args)));
     case "reading_search_chunks":
       return textContent(await searchChunks(args));
     case "reading_import_book":
@@ -475,9 +498,9 @@ export async function callTool(name, args = {}) {
       if (args.confirm !== true) throw new Error("reading_delete_book requires confirm: true");
       return textContent(await deleteBook(args.bookId));
     case "reading_annotate_passage":
-      return textContent(await annotatePassage({ ...args, author: "claude", status: "published" }));
+      return textContent(assistantAnnotation(await annotatePassage(assistantInput(args), { requireVisibleParent: true })));
     case "reading_list_annotations":
-      return textContent(await listAnnotations(args));
+      return textContent(await listAnnotations({ ...args, includePrivate: false }));
     case "reading_submit_user_notes":
       return textContent(await submitUserNotes(args));
     case "reading_list_submissions":
@@ -485,13 +508,13 @@ export async function callTool(name, args = {}) {
     case "reading_read_submission":
       return textContent(await readSubmission(args.submissionId));
     case "reading_reply_to_annotation":
-      return textContent(await replyToAnnotation({ ...args, author: "claude", status: "published" }));
+      return textContent(assistantAnnotation(await replyToAnnotation(assistantInput(args), { requireVisibleParent: true })));
     case "reading_mark_read":
       return textContent(await markRead(args.bookId, args.chunkId));
     case "reading_card_inbox":
-      return textContent(await listCardInbox(args));
+      return textContent(await listCardInbox({ ...args, includePrivate: false }));
     case "reading_card_collection":
-      return textContent(await listCardCollection(args));
+      return textContent(await listCardCollection({ ...args, includePrivate: false }));
     case "reading_open_card": {
       const card = await readCard(args.cardId);
       return imageContent({
@@ -511,9 +534,9 @@ export async function callTool(name, args = {}) {
     case "reading_dismiss_card":
       return textContent(await dismissCard(args.cardId));
     case "reading_list_cards":
-      return textContent(await listCards(args));
+      return textContent(await listCards({ ...args, includePrivate: false }));
     case "reading_collect_card":
-      return textContent(await collectCard({ ...args, createdBy: "claude" }));
+      return textContent(await collectCard({ ...args, createdBy: "assistant" }));
     case "reading_get_progress":
       return textContent(await getProgress(args.bookId));
     default:
@@ -527,11 +550,11 @@ export async function handle(message) {
   if (message.method === "initialize") {
     return result(message.id, {
       protocolVersion,
-      serverInfo: { name: "co-reading-mcp", version: "0.1.0" },
+      serverInfo: { name: "co-reading-mcp", version: "0.2.0" },
       capabilities: { tools: {} },
       instructions:
         `Use this server as a shared co-reading surface. ` +
-        `Claude can import EPUB/TXT uploads, continue reading, read chunked books, search passages, track progress, leave margin annotations, ` +
+        `Connected assistants can import EPUB/TXT uploads, continue reading, read chunked books and their shared notes, search passages, track progress, and leave explicitly signed margin annotations. Never assume or impersonate Claude authorship. ` +
         `reply under user notes, and call reading_submit_user_notes when the human sends staged notes. ` +
         `Reading actions may return cardNotification when a bookmark card is waiting; open it with reading_open_card, save it to a local file with reading_save_card, or clear it with reading_dismiss_card. Use reading_card_collection to browse cards by pages without loading every image. ` +
         `Use reading_import_book for small uploads, or reading_import_begin/part/finish for large files. ` +

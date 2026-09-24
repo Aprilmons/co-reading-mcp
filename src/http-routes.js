@@ -3,6 +3,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   annotatePassage,
+  createReaderAnnotation,
+  updateReaderAnnotation,
+  getReaderAnnotation,
+  readerCapabilities,
+  ReaderNoteError,
   collectCard,
   continueReading,
   deleteBook,
@@ -71,6 +76,29 @@ export async function handleApi(req, res, url, options = {}) {
   const parts = routeParts(url);
   const maxBytes = options.maxBodyBytes || defaultMaxBodyBytes;
 
+  if (parts[1] === "reader") {
+    try {
+      if (req.method === "GET" && parts.length === 3 && parts[2] === "capabilities") return sendJson(res, 200, readerCapabilities);
+      if (parts[2] === "annotations") {
+        if (req.method === "GET" && parts.length === 4) return sendJson(res, 200, await getReaderAnnotation(parts[3]));
+        if ((req.method === "POST" && parts.length === 3) || (req.method === "PATCH" && parts.length === 4)) {
+          let body;
+          try { body = await readBody(req, { maxBytes: Math.min(maxBytes, 160000), allowEmpty: false }); }
+          catch (error) {
+            const tooLarge = /exceeds/.test(error.message || "");
+            return sendJson(res, tooLarge ? 413 : 400, { error: { code: tooLarge ? "too_large" : "invalid_request", message: tooLarge ? "Annotation request is too large" : "A valid JSON annotation request is required" } });
+          }
+          const result = req.method === "POST" ? await createReaderAnnotation(body) : await updateReaderAnnotation(parts[3], body);
+          return sendJson(res, req.method === "POST" && !result.replayed ? 201 : 200, result);
+        }
+      }
+      return sendJson(res, 404, { error: { code: "not_found", message: "Reader endpoint was not found" } });
+    } catch (error) {
+      if (!(error instanceof ReaderNoteError)) throw error;
+      return sendJson(res, error.status, { error: { code: error.code, message: error.message, ...(error.latest ? { latest: error.latest } : {}) } });
+    }
+  }
+
   if (req.method === "GET" && parts.length === 2 && parts[1] === "books") {
     return sendJson(res, 200, await listBooks({ includePrivate: true }));
   }
@@ -112,6 +140,7 @@ export async function handleApi(req, res, url, options = {}) {
       res,
       200,
       await listCards({
+        includePrivate: true,
         bookId: url.searchParams.get("bookId") || undefined,
         chunkId: url.searchParams.get("chunkId") || undefined,
         source: url.searchParams.get("source") || undefined,
@@ -126,6 +155,7 @@ export async function handleApi(req, res, url, options = {}) {
       res,
       200,
       await listCardCollection({
+        includePrivate: true,
         bookId: url.searchParams.get("bookId") || undefined,
         limit: Number(url.searchParams.get("limit") || 12),
         offset: Number(url.searchParams.get("offset") || 0),
@@ -138,6 +168,7 @@ export async function handleApi(req, res, url, options = {}) {
       res,
       200,
       await listCardInbox({
+        includePrivate: true,
         bookId: url.searchParams.get("bookId") || undefined,
         limit: Number(url.searchParams.get("limit") || 10),
       }),
@@ -145,26 +176,26 @@ export async function handleApi(req, res, url, options = {}) {
   }
 
   if (req.method === "GET" && parts.length === 4 && parts[1] === "cards" && parts[3] === "image.svg") {
-    const card = await readCard(parts[2]);
+    const card = await readCard(parts[2], { includePrivate: true });
     res.writeHead(200, { "content-type": "image/svg+xml; charset=utf-8" });
     res.end(renderCardSvg(card));
     return;
   }
 
   if (req.method === "GET" && parts.length === 4 && parts[1] === "cards" && parts[3] === "image.png") {
-    const card = await readCard(parts[2]);
+    const card = await readCard(parts[2], { includePrivate: true });
     res.writeHead(200, { "content-type": "image/png" });
     res.end(renderCardPng(card));
     return;
   }
 
   if (req.method === "POST" && parts.length === 4 && parts[1] === "cards" && parts[3] === "dismiss") {
-    return sendJson(res, 200, await dismissCard(parts[2]));
+    return sendJson(res, 200, await dismissCard(parts[2], { includePrivate: true }));
   }
 
   if (req.method === "POST" && parts.length === 2 && parts[1] === "cards") {
     const body = await readBody(req, { maxBytes });
-    return sendJson(res, 201, await collectCard({ ...body, createdBy: body.createdBy || "human" }));
+    return sendJson(res, 201, await collectCard({ ...body, createdBy: "human" }, { includePrivate: true }));
   }
 
   if (req.method === "POST" && parts.length === 2 && parts[1] === "annotations") {
@@ -174,7 +205,7 @@ export async function handleApi(req, res, url, options = {}) {
       201,
       await annotatePassage({
         ...body,
-        author: body.author || "user",
+        author: "user", role: "human", displayName: "读者",
         status: body.status || "open",
       }),
     );
@@ -187,7 +218,7 @@ export async function handleApi(req, res, url, options = {}) {
       201,
       await replyToAnnotation({
         ...body,
-        author: body.author || "user",
+        author: "user", role: "human", displayName: "读者",
         kind: body.kind || "reply",
       }),
     );

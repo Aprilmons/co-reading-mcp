@@ -22,6 +22,33 @@ export function isClaudeAuthor(author) {
   return String(author || "").toLowerCase() === "claude";
 }
 
+function isHumanAnnotation(annotation) {
+  if (annotation.role === "human" || annotation.role === "assistant") return annotation.role === "human";
+  return isHumanAuthor(annotation.author);
+}
+
+function annotationLabel(annotation) {
+  return annotation.displayName || (isHumanAnnotation(annotation) ? "You"
+    : isClaudeAuthor(annotation.author) ? "Claude" : annotation.author || "Assistant");
+}
+
+function sharedCardAnnotations(annotations) {
+  const privateNote = (annotation) => annotation.visibility === "private"
+    || ["open", "private", "draft"].includes(annotation.status);
+  const hidden = new Set(annotations.filter(privateNote).map((annotation) => annotation.id));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const annotation of annotations) {
+      if (annotation.parentId && hidden.has(annotation.parentId) && !hidden.has(annotation.id)) {
+        hidden.add(annotation.id);
+        changed = true;
+      }
+    }
+  }
+  return annotations.filter((annotation) => !privateNote(annotation) && !hidden.has(annotation.id));
+}
+
 export function normalizeForOverlap(value) {
   return String(value || "")
     .toLowerCase()
@@ -63,9 +90,9 @@ export function rootAnnotations(annotations = []) {
 }
 
 export function findSharedMoments(annotations = []) {
-  const roots = rootAnnotations(annotations);
-  const human = roots.filter((annotation) => isHumanAuthor(annotation.author));
-  const claude = roots.filter((annotation) => isClaudeAuthor(annotation.author));
+  const roots = rootAnnotations(sharedCardAnnotations(annotations));
+  const human = roots.filter(isHumanAnnotation);
+  const claude = roots.filter((annotation) => !isHumanAnnotation(annotation));
   const moments = [];
   for (const userNote of human) {
     for (const claudeNote of claude) {
@@ -92,6 +119,7 @@ export function sharedNoteIdSet(annotations = []) {
 }
 
 export function buildCardCandidates({ book = {}, chunk = {}, annotations = [], finish = null } = {}) {
+  annotations = sharedCardAnnotations(annotations);
   const candidates = [];
   const shared = findSharedMoments(annotations);
   const lowSignal = isLowSignalChunk(chunk);
@@ -105,12 +133,13 @@ export function buildCardCandidates({ book = {}, chunk = {}, annotations = [], f
       title: "Shared Margin",
       subtitle: [book.title, chunk.title].filter(Boolean).join(" · "),
       quote: compactText(moment.quote, 150),
-      leftLabel: "Claude",
+      leftLabel: annotationLabel(moment.claudeNote),
       leftText: compactText(moment.claudeNote.note, 130),
-      rightLabel: "You",
+      rightLabel: annotationLabel(moment.userNote),
       rightText: compactText(moment.userNote.note, 130),
       footer: "Read together, once at the same sentence.",
       source: "shared",
+      sourceAnnotationIds: [moment.userNote.id, moment.claudeNote.id].filter(Boolean),
     });
   }
 
@@ -130,10 +159,11 @@ export function buildCardCandidates({ book = {}, chunk = {}, annotations = [], f
       rightText: `${finish.annotationCount || 0} notes`,
       footer: finish.celebration?.prompt || "Choose one sentence to carry forward.",
       source: "finish",
+      sourceAnnotationIds: annotations.map((annotation) => annotation.id).filter(Boolean),
     });
   }
 
-  const visibleRoots = rootAnnotations(annotations).filter((annotation) => !isHumanAuthor(annotation.author) || annotation.status === "submitted");
+  const visibleRoots = rootAnnotations(annotations);
   const resonant = visibleRoots.find((annotation) => ["resonance", "feeling", "annotation"].includes(annotation.kind || "annotation"));
   if (resonant && !lowSignal) {
     candidates.push({
@@ -145,12 +175,13 @@ export function buildCardCandidates({ book = {}, chunk = {}, annotations = [], f
       title: book.title || "Co-Reading",
       subtitle: chunk.title || "",
       quote: compactText(resonant.quote, 150),
-      leftLabel: isClaudeAuthor(resonant.author) ? "Claude" : "You",
+      leftLabel: annotationLabel(resonant),
       leftText: compactText(resonant.note, 150),
       rightLabel: "",
       rightText: "",
       footer: "A small card from the margin.",
       source: "quiet",
+      sourceAnnotationIds: [resonant.id].filter(Boolean),
     });
   }
 

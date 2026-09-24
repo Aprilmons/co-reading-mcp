@@ -75,14 +75,23 @@ async function fileSignature(filePath) {
 }
 
 async function writeJson(filePath, value) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await atomicWrite(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function writeJsonl(filePath, rows) {
-  await mkdir(path.dirname(filePath), { recursive: true });
   const body = rows.map((row) => JSON.stringify(row)).join("\n");
-  await writeFile(filePath, body ? `${body}\n` : "", "utf8");
+  await atomicWrite(filePath, body ? `${body}\n` : "");
+}
+
+async function atomicWrite(filePath, body) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${crypto.randomBytes(12).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporary, body, { encoding: "utf8", mode: 0o600 });
+    await rename(temporary, filePath);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }
 
 function safeTrashName(value) {
@@ -219,13 +228,13 @@ async function maybeCollectSectionCard({ manifest, targetChunk, progressEntry, f
   if (!segmentComplete && !finish) return null;
 
   const segmentKey = `${manifest.bookId}:${segment.key}`;
-  const existing = (await readAllCards()).find(
+  const existing = (await visibleCards(await readAllCards())).find(
     (card) => card.bookId === manifest.bookId && card.context?.segmentKey === segmentKey,
   );
   if (existing) return cardSummary(existing);
 
   const segmentIds = new Set(segment.chunks.map((chunk) => chunk.id));
-  const annotations = (await readAllAnnotations()).filter(
+  const annotations = visibleAnnotations(await readAllAnnotations()).filter(
     (annotation) => annotation.bookId === manifest.bookId && segmentIds.has(annotation.chunkId),
   );
   const chunk = await readChunk(manifest.bookId, targetChunk.id);
@@ -258,6 +267,7 @@ async function maybeCollectSectionCard({ manifest, targetChunk, progressEntry, f
     variant: candidate.variant || "quiet",
     source: "section-complete",
     candidateSource: candidate.source || null,
+    sourceAnnotationIds: annotations.map((annotation) => annotation.id).filter(Boolean),
     createdBy: "system",
     createdAt: now,
     status: "new",
@@ -351,10 +361,10 @@ function chooseBookFinishMoment(roots, replies) {
   const threaded = roots
     .map((root) => {
       const thread = [root, ...(repliesByParent.get(String(root.id)) || [])];
-      const hasHuman = thread.some((item) => isHumanAuthor(item.author));
-      const hasClaude = thread.some((item) => isClaudeAuthor(item.author));
+      const hasHuman = thread.some(isHumanAnnotation);
+      const hasClaude = thread.some((item) => annotationRole(item) === "assistant");
       const noteSource =
-        thread.filter((item) => isClaudeAuthor(item.author)).sort((a, b) => momentScore(b) - momentScore(a))[0]
+        thread.filter((item) => annotationRole(item) === "assistant").sort((a, b) => momentScore(b) - momentScore(a))[0]
         || thread.sort((a, b) => momentScore(b) - momentScore(a))[0];
       return { root, thread, noteSource, hasHuman, hasClaude, score: momentScore(root, thread.slice(1)) };
     })
@@ -369,28 +379,28 @@ function chooseBookFinishMoment(roots, replies) {
     byChunk.set(key, [...(byChunk.get(key) || []), root]);
   }
   const paired = Array.from(byChunk.values())
-    .filter((items) => items.some((item) => isHumanAuthor(item.author)) && items.some((item) => isClaudeAuthor(item.author)))
-    .flatMap((items) => items.filter((item) => isClaudeAuthor(item.author)).concat(items.filter((item) => isHumanAuthor(item.author))).slice(0, 1))
+    .filter((items) => items.some(isHumanAnnotation) && items.some((item) => annotationRole(item) === "assistant"))
+    .flatMap((items) => items.filter((item) => annotationRole(item) === "assistant").concat(items.filter(isHumanAnnotation)).slice(0, 1))
     .filter((item) => String(item.quote || "").trim())
     .sort((a, b) => momentScore(b) - momentScore(a));
   if (paired[0]) return { root: paired[0], noteSource: paired[0], shared: true, reason: "shared-chunk" };
 
   const claude = roots
-    .filter((item) => isClaudeAuthor(item.author) && String(item.quote || "").trim())
+    .filter((item) => annotationRole(item) === "assistant" && String(item.quote || "").trim())
     .sort((a, b) => momentScore(b) - momentScore(a));
   if (claude[0]) return { root: claude[0], noteSource: claude[0], shared: false, reason: "claude-margin" };
 
   const any = roots
     .filter((item) => String(item.quote || "").trim())
     .sort((a, b) => momentScore(b) - momentScore(a));
-  return { root: any[0], noteSource: any[0], shared: Boolean(any[0] && isHumanAuthor(any[0].author)), reason: "fallback" };
+  return { root: any[0], noteSource: any[0], shared: Boolean(any[0] && isHumanAnnotation(any[0])), reason: "fallback" };
 }
 
 async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = null }) {
   const summary = progressSummary(manifest, progressEntry);
   if (!summary.complete) return null;
   const segmentKey = `${manifest.bookId}:book-finish`;
-  const existing = (await readAllCards()).find(
+  const existing = (await visibleCards(await readAllCards())).find(
     (card) => card.bookId === manifest.bookId && card.context?.segmentKey === segmentKey,
   );
   if (existing) return cardSummary(existing);
@@ -430,6 +440,7 @@ async function maybeCollectBookFinishCard({ manifest, progressEntry, finish = nu
     variant: moment.shared ? "shared-finish" : "solo-finish",
     scope: "book",
     source: "book-complete",
+    sourceAnnotationIds: bookAnnotations.map((annotation) => annotation.id).filter(Boolean),
     createdBy: "system",
     createdAt: now,
     status: "new",
@@ -503,6 +514,36 @@ function isHumanAuthor(author) {
   return ["user", "human", "koshi", "you"].includes(String(author || "").toLowerCase());
 }
 
+function annotationRole(annotation) {
+  if (annotation.role === "human" || annotation.role === "assistant") return annotation.role;
+  return isHumanAuthor(annotation.author) ? "human" : "assistant";
+}
+
+function isHumanAnnotation(annotation) {
+  return annotationRole(annotation) === "human";
+}
+
+function publicAnnotation(annotation) {
+  const { _readerRequests, ...value } = annotation;
+  const role = annotationRole(annotation);
+  const visibility = annotation.visibility || (["open", "private", "draft"].includes(annotation.status) ? "private" : "shared");
+  return {
+    ...value,
+    role,
+    displayName: annotation.displayName || (role === "human" ? "读者" : annotation.author || "Unknown assistant"),
+    visibility,
+    revision: Number.isSafeInteger(annotation.revision) && annotation.revision > 0 ? annotation.revision : 1,
+    anchor: annotation.anchor || (Number.isSafeInteger(annotation.quoteOffset) && annotation.quoteOffset >= 0
+      ? { start: annotation.quoteOffset, end: annotation.quoteOffset + String(annotation.quote || "").length } : null),
+    updatedAt: annotation.updatedAt || annotation.createdAt || null,
+  };
+}
+
+export function assistantAnnotation(annotation) {
+  const { annotationIndexInBook, annotationIndexInChunk, replyIndex, message, ...value } = publicAnnotation(annotation);
+  return value;
+}
+
 function isClaudeAuthor(author) {
   const value = String(author || "").toLowerCase();
   return !isHumanAuthor(value) && (!value || value === "claude" || value === "assistant");
@@ -510,7 +551,7 @@ function isClaudeAuthor(author) {
 
 function isPrivateHumanAnnotation(annotation) {
   const status = annotation.status || "published";
-  return isHumanAuthor(annotation.author) && ["open", "private", "draft"].includes(status);
+  return annotation.visibility === "private" || ["open", "private", "draft"].includes(status);
 }
 
 function visibleAnnotations(rows, { includePrivate = false } = {}) {
@@ -940,7 +981,7 @@ export async function markRead(bookId, chunkId) {
     };
 
     if (summary.complete) {
-      const annotations = (await readAllAnnotations()).filter(
+      const annotations = visibleAnnotations(await readAllAnnotations()).filter(
         (annotation) => annotation.bookId === bookId && !annotation.parentId,
       );
       const moodCounts = countBy(annotations.map((annotation) => annotation.mood).filter(Boolean));
@@ -1042,10 +1083,33 @@ function cardSummary(card) {
   return summary;
 }
 
-export async function listCards({ bookId, chunkId, source, scope, limit = 20, offset = 0 } = {}) {
+async function visibleCards(cards, { includePrivate = false } = {}) {
+  if (includePrivate) return cards;
+  const annotations = await readAllAnnotations();
+  const visibleIds = new Set(visibleAnnotations(annotations).map((annotation) => annotation.id));
+  const hidden = annotations.filter((annotation) => !visibleIds.has(annotation.id));
+  return cards.filter((card) => {
+    if (card.visibility === "private") return false;
+    if (Array.isArray(card.sourceAnnotationIds)) {
+      return card.sourceAnnotationIds.every((id) => visibleIds.has(id));
+    }
+    // Legacy cards contain copied notes but no reliable source IDs. Keep them
+    // available to the human reader; do not expose a potentially private copy.
+    const wholeBook = (card.scope || card.context?.scope) === "book" || card.source === "book-complete";
+    const segmentIds = Array.isArray(card.context?.segmentChunkIds) ? card.context.segmentChunkIds : [];
+    return !hidden.some((annotation) => {
+      if (card.bookId && annotation.bookId !== card.bookId) return false;
+      if (!wholeBook && segmentIds.length) return segmentIds.includes(annotation.chunkId);
+      if (!wholeBook && card.chunkId) return annotation.chunkId === card.chunkId;
+      return true;
+    });
+  });
+}
+
+export async function listCards({ bookId, chunkId, source, scope, limit = 20, offset = 0, includePrivate = false } = {}) {
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const start = Math.max(Number(offset) || 0, 0);
-  return (await readAllCards())
+  return (await visibleCards(await readAllCards(), { includePrivate }))
     .filter((card) => !bookId || card.bookId === bookId)
     .filter((card) => !chunkId || card.chunkId === chunkId)
     .filter((card) => !source || card.source === source)
@@ -1055,8 +1119,8 @@ export async function listCards({ bookId, chunkId, source, scope, limit = 20, of
     .map(cardSummary);
 }
 
-export async function listCardInbox({ bookId, limit = 10 } = {}) {
-  return (await listCards({ bookId, limit }))
+export async function listCardInbox({ bookId, limit = 10, includePrivate = false } = {}) {
+  return (await listCards({ bookId, limit, includePrivate }))
     .filter((card) => (card.status || "new") !== "dismissed")
     .map((card) => ({
       id: card.id,
@@ -1068,10 +1132,12 @@ export async function listCardInbox({ bookId, limit = 10 } = {}) {
     }));
 }
 
-export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}) {
+export async function listCardCollection({ bookId, limit = 12, offset = 0, includePrivate = false } = {}) {
   const max = Math.min(Math.max(Number(limit) || 12, 1), 50);
   const start = Math.max(Number(offset) || 0, 0);
-  const all = await listCards({ bookId, limit: 10_000, offset: 0 });
+  const all = (await visibleCards(await readAllCards(), { includePrivate }))
+    .filter((card) => !bookId || card.bookId === bookId)
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const toItem = (card) => ({
     id: card.id,
     title: card.title || card.bookTitle || "Reading card",
@@ -1096,9 +1162,9 @@ export async function listCardCollection({ bookId, limit = 12, offset = 0 } = {}
   };
 }
 
-export async function latestCardNotification({ bookId } = {}) {
-  const inbox = await listCardInbox({ bookId, limit: 1 });
-  const card = inbox[0] || (bookId ? (await listCardInbox({ limit: 1 }))[0] : null);
+export async function latestCardNotification({ bookId, includePrivate = false } = {}) {
+  const inbox = await listCardInbox({ bookId, limit: 1, includePrivate });
+  const card = inbox[0] || (bookId ? (await listCardInbox({ limit: 1, includePrivate }))[0] : null);
   if (!card) return null;
   return {
     message: card.message || "收获了一枚回声书签",
@@ -1112,17 +1178,19 @@ export async function latestCardNotification({ bookId } = {}) {
   };
 }
 
-export async function readCard(cardId) {
+export async function readCard(cardId, { includePrivate = false } = {}) {
   if (!cardId) throw new Error("cardId is required");
   const card = (await readAllCards()).find((item) => item.id === cardId);
-  if (!card) throw new Error(`Unknown cardId: ${cardId}`);
+  if (!card || !(await visibleCards([card], { includePrivate })).length) throw new Error(`Unknown cardId: ${cardId}`);
   return card;
 }
 
-export async function dismissCard(cardId) {
+export async function dismissCard(cardId, { includePrivate = false } = {}) {
   if (!cardId) throw new Error("cardId is required");
   return withWriteLock(async () => {
     const cards = await readAllCards();
+    const candidate = cards.find((card) => card.id === cardId);
+    if (!candidate || !(await visibleCards([candidate], { includePrivate })).length) throw new Error(`Unknown cardId: ${cardId}`);
     let found = null;
     const dismissedAt = new Date().toISOString();
     const updated = cards.map((card) => {
@@ -1141,9 +1209,13 @@ export async function dismissCard(cardId) {
   });
 }
 
-export async function collectCard(input = {}) {
+export async function collectCard(input = {}, { includePrivate = false } = {}) {
   return withWriteLock(async () => {
     const { bookId, chunkId } = input;
+    if (input.sourceAnnotationIds !== undefined && (!Array.isArray(input.sourceAnnotationIds)
+      || input.sourceAnnotationIds.some((id) => typeof id !== "string" || !id.trim()))) {
+      throw new Error("sourceAnnotationIds must be an array of annotation IDs");
+    }
     let chunk = null;
     if (bookId && chunkId) {
       chunk = await readChunk(bookId, chunkId);
@@ -1172,8 +1244,13 @@ export async function collectCard(input = {}) {
       createdBy: input.createdBy || "human",
       createdAt: now,
       context: input.context || null,
+      ...(Array.isArray(input.sourceAnnotationIds) ? { sourceAnnotationIds: [...new Set(input.sourceAnnotationIds)] } : {}),
+      ...(input.visibility === "private" ? { visibility: "private" } : {}),
     };
 
+    if (!(await visibleCards([card], { includePrivate })).length) {
+      throw new Error("Card sources are not available for sharing");
+    }
     await mkdir(dataDir, { recursive: true });
     await appendFile(cardsPath, `${JSON.stringify(card)}\n`, "utf8");
     return {
@@ -1191,11 +1268,15 @@ export async function listAnnotations({ bookId, chunkId, kind, author, status, p
     .filter((item) => !kind || item.kind === kind)
     .filter((item) => !author || item.author === author)
     .filter((item) => !status || (item.status || "published") === status)
-    .filter((item) => parentId === undefined || (item.parentId || null) === parentId);
+    .filter((item) => parentId === undefined || (item.parentId || null) === parentId)
+    .map(includePrivate ? publicAnnotation : assistantAnnotation);
 }
 
-export async function annotatePassage(input) {
-  return withWriteLock(async () => {
+export async function annotatePassage(input, { requireVisibleParent = false } = {}) {
+  return withWriteLock(() => saveAnnotation(input, { requireVisibleParent }));
+}
+
+async function saveAnnotation(input, { requireVisibleParent = false } = {}) {
     const { bookId, chunkId, quote, note } = input;
     if (!bookId) throw new Error("bookId is required");
     if (!chunkId) throw new Error("chunkId is required");
@@ -1203,10 +1284,21 @@ export async function annotatePassage(input) {
     if (!note) throw new Error("note is required");
 
     const chunk = await readChunk(bookId, chunkId);
-    const quoteOffset = chunk.text.indexOf(quote);
-    const author = input.author || "claude";
+    const inheritedAnchor = input.anchor;
+    const quoteOffset = inheritedAnchor && Number.isSafeInteger(inheritedAnchor.start) && Number.isSafeInteger(inheritedAnchor.end)
+      && inheritedAnchor.start >= 0 && inheritedAnchor.end > inheritedAnchor.start
+      && chunk.text.slice(inheritedAnchor.start, inheritedAnchor.end) === quote
+      ? inheritedAnchor.start : chunk.text.indexOf(quote);
+    const author = input.author || "unknown-assistant";
     const parentId = input.parentId || null;
     const existingAnnotations = await readAllAnnotations();
+    if (parentId) {
+      const parent = existingAnnotations.find((item) => item.id === parentId);
+      if (!parent || parent.bookId !== bookId || parent.chunkId !== chunkId) throw new Error("Annotation parent does not match the source chunk");
+      if (requireVisibleParent && !visibleAnnotations(existingAnnotations).some((item) => item.id === parentId)) {
+        throw new Error("Annotation parent is unavailable to this assistant");
+      }
+    }
     const rootAnnotations = existingAnnotations.filter((annotation) => !annotation.parentId);
     const annotationIndexInBook = parentId
       ? null
@@ -1224,6 +1316,8 @@ export async function annotatePassage(input) {
       quote,
       note,
       author,
+      role: input.role === "human" || input.role === "assistant" ? input.role : (isHumanAuthor(author) ? "human" : "assistant"),
+      displayName: input.displayName || (isHumanAuthor(author) ? "读者" : author),
       kind: input.kind || "annotation",
       mood: input.mood || null,
       tags: Array.isArray(input.tags) ? input.tags : [],
@@ -1241,10 +1335,144 @@ export async function annotatePassage(input) {
       ? `Saved reply ${replyIndex} under annotation ${parentId}.`
       : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`;
 
-    await mkdir(dataDir, { recursive: true });
-    await appendFile(annotationsPath, `${JSON.stringify(annotation)}\n`, "utf8");
+    await writeJsonl(annotationsPath, [...existingAnnotations, annotation]);
     invalidateAnnotationCache();
-    return annotation;
+    return publicAnnotation(annotation);
+}
+
+export class ReaderNoteError extends Error {
+  constructor(status, code, message, latest) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    if (latest) this.latest = publicAnnotation(latest);
+  }
+}
+
+export const readerCapabilities = Object.freeze({ readerAnnotations: {
+  version: 1, write: true, reply: true, visibility: true,
+  maxNoteLength: 20000, maxQuoteLength: 12000, anchorEncoding: "utf16",
+} });
+
+function noteError(status, code, message, latest) { throw new ReaderNoteError(status, code, message, latest); }
+function checkedText(value, field, maximum) {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum || value.includes("\u0000")) {
+    noteError(400, "invalid_request", `${field} must be non-empty text of at most ${maximum} UTF-16 units`);
+  }
+  return value;
+}
+function checkedRequest(input, allowed) {
+  if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !allowed.includes(key))) {
+    noteError(400, "invalid_request", "Unexpected annotation fields");
+  }
+  if (typeof input.clientRequestId !== "string" || !/^[A-Za-z0-9_-]{8,120}$/.test(input.clientRequestId)) {
+    noteError(400, "invalid_request", "A stable clientRequestId is required");
+  }
+}
+function checkedVisibility(value) {
+  if (value !== "private" && value !== "shared") noteError(400, "invalid_request", "visibility must be private or shared");
+  return value;
+}
+function readerRequestHash(operation, input) {
+  const sorted = (value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, sorted(value[key])])) : value;
+  return crypto.createHash("sha256").update(JSON.stringify(sorted({ operation, input }))).digest("hex");
+}
+function findReaderReplay(rows, requestId, fingerprint) {
+  for (const row of rows) {
+    const request = (row._readerRequests || []).find((item) => item.id === requestId);
+    if (!request) continue;
+    if (request.hash !== fingerprint) noteError(409, "idempotency_conflict", "This request ID was already used for different content");
+    return { annotation: publicAnnotation(row), replayed: true };
+  }
+  return null;
+}
+function assertSharedParent(rows, parentId, visibility) {
+  if (visibility === "shared" && parentId && !visibleAnnotations(rows).some((row) => row.id === parentId)) {
+    noteError(409, "private_thread", "Share the parent note before sharing this reply");
+  }
+}
+
+export async function getReaderAnnotation(id) {
+  const row = (await readAllAnnotations()).find((item) => item.id === id);
+  if (!row) noteError(404, "not_found", "Annotation was not found");
+  return { annotation: publicAnnotation(row) };
+}
+
+export async function createReaderAnnotation(input) {
+  checkedRequest(input, ["bookId", "chunkId", "quote", "note", "anchor", "visibility", "clientRequestId", "parentId"]);
+  checkedText(input.bookId, "bookId", 240); checkedText(input.chunkId, "chunkId", 240);
+  checkedText(input.quote, "quote", 12000); checkedText(input.note, "note", 20000);
+  const visibility = checkedVisibility(input.visibility ?? "private");
+  if (input.parentId !== undefined) checkedText(input.parentId, "parentId", 240);
+  const anchor = input.anchor;
+  if (!anchor || typeof anchor !== "object" || Array.isArray(anchor) || Object.keys(anchor).some((key) => !["start", "end"].includes(key))
+      || !Number.isSafeInteger(anchor.start) || !Number.isSafeInteger(anchor.end) || anchor.start < 0 || anchor.end <= anchor.start) {
+    noteError(400, "invalid_request", "An exact UTF-16 anchor is required");
+  }
+  const fingerprint = readerRequestHash("create", input);
+  return withWriteLock(async () => {
+    const rows = await readAllAnnotations();
+    const replay = findReaderReplay(rows, input.clientRequestId, fingerprint);
+    if (replay) return replay;
+    let source;
+    try { source = await readChunk(input.bookId, input.chunkId); }
+    catch { noteError(404, "not_found", "Source book or chunk was not found"); }
+    if (anchor.end > source.text.length || source.text.slice(anchor.start, anchor.end) !== input.quote) {
+      noteError(400, "anchor_mismatch", "The selected text no longer matches the source; select it again");
+    }
+    if (input.parentId) {
+      const parent = rows.find((row) => row.id === input.parentId);
+      if (!parent || parent.bookId !== input.bookId || parent.chunkId !== input.chunkId) {
+        noteError(400, "invalid_request", "The parent note must belong to the same source chunk");
+      }
+    }
+    assertSharedParent(rows, input.parentId, visibility);
+    const now = new Date().toISOString();
+    const annotation = {
+      id: `ann_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
+      bookId: input.bookId, chunkId: input.chunkId, quote: input.quote, note: input.note,
+      author: "user", role: "human", displayName: "读者", kind: input.parentId ? "reply" : "annotation",
+      mood: null, tags: [], parentId: input.parentId || null,
+      visibility, status: visibility === "shared" ? "published" : "private",
+      anchor: { start: anchor.start, end: anchor.end }, quoteOffset: anchor.start,
+      prevId: source.prevId, nextId: source.nextId, revision: 1, createdAt: now, updatedAt: now,
+      _readerRequests: [{ id: input.clientRequestId, hash: fingerprint }],
+    };
+    await writeJsonl(annotationsPath, [...rows, annotation]);
+    invalidateAnnotationCache();
+    return { annotation: publicAnnotation(annotation) };
+  });
+}
+
+export async function updateReaderAnnotation(id, input) {
+  checkedRequest(input, ["expectedRevision", "clientRequestId", "note", "visibility"]);
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 || (input.note === undefined && input.visibility === undefined)) {
+    noteError(400, "invalid_request", "expectedRevision and a note or visibility change are required");
+  }
+  if (input.note !== undefined) checkedText(input.note, "note", 20000);
+  if (input.visibility !== undefined) checkedVisibility(input.visibility);
+  const fingerprint = readerRequestHash(`update:${id}`, input);
+  return withWriteLock(async () => {
+    const rows = await readAllAnnotations();
+    const original = rows.find((row) => row.id === id);
+    if (!original) noteError(404, "not_found", "Annotation was not found");
+    if (!isHumanAnnotation(original)) noteError(403, "not_owner", "Only your own reader notes can be edited");
+    const replay = findReaderReplay(rows, input.clientRequestId, fingerprint);
+    if (replay) return replay;
+    const current = publicAnnotation(original);
+    if (current.revision !== input.expectedRevision) noteError(409, "revision_conflict", "The note has changed; review the current version before saving", original);
+    const visibility = input.visibility ?? current.visibility;
+    assertSharedParent(rows, original.parentId, visibility);
+    const updated = { ...original, note: input.note ?? original.note, role: "human",
+      displayName: original.displayName || "读者", visibility,
+      status: visibility === "shared" ? "published" : "private",
+      revision: current.revision + 1, updatedAt: new Date().toISOString(),
+      _readerRequests: [...(original._readerRequests || []), { id: input.clientRequestId, hash: fingerprint }],
+    };
+    await writeJsonl(annotationsPath, rows.map((row) => row.id === id ? updated : row));
+    invalidateAnnotationCache();
+    return { annotation: publicAnnotation(updated) };
   });
 }
 
@@ -1262,9 +1490,11 @@ export async function submitUserNotes({
     const submitted = [];
     const updated = annotations.map((annotation) => {
       const status = annotation.status || "published";
-      const shouldSubmit =
-        isHumanAuthor(annotation.author) &&
-        ["open", "private", "draft"].includes(status) &&
+    const shouldSubmit =
+        isHumanAnnotation(annotation) &&
+        annotation.visibility !== "private" &&
+        ["open", "draft"].includes(status) &&
+        !hasExplicitPrivateAncestor(annotation, annotations) &&
         (!bookId || annotation.bookId === bookId) &&
         (!chunkId || annotation.chunkId === chunkId);
 
@@ -1327,7 +1557,7 @@ export async function submitUserNotes({
       sessionId,
       submissionId: submission?.id || null,
       count: submitted.length,
-      notes: submitted,
+      notes: submitted.map(assistantAnnotation),
       context,
       message:
         submitted.length === 0
@@ -1339,7 +1569,8 @@ export async function submitUserNotes({
 
 export async function listSubmissions({ bookId, chunkId, sessionId, limit = 20 } = {}) {
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
-  return (await readAllSubmissions())
+  const rows = await readAllAnnotations();
+  return (await readAllSubmissions()).map((item) => visibleSubmission(item, rows)).filter(Boolean)
     .filter((item) => !bookId || item.bookIds?.includes(bookId) || item.bookId === bookId)
     .filter((item) => !chunkId || item.chunkIds?.includes(chunkId) || item.chunkId === chunkId)
     .filter((item) => !sessionId || item.sessionId === sessionId)
@@ -1352,33 +1583,75 @@ export async function readSubmission(submissionId) {
   if (!submissionId) throw new Error("submissionId is required");
   const submission = (await readAllSubmissions()).find((item) => item.id === submissionId);
   if (!submission) throw new Error(`Unknown submissionId: ${submissionId}`);
-  return submission;
+  const visible = visibleSubmission(submission, await readAllAnnotations());
+  if (!visible) throw new Error("Submission is unavailable to this assistant");
+  return visible;
 }
 
-export async function replyToAnnotation(input) {
+function hasExplicitPrivateAncestor(annotation, rows) {
+  const seen = new Set([annotation.id]);
+  let id = annotation.parentId;
+  while (id) {
+    if (seen.has(id)) return true;
+    seen.add(id);
+    const parent = rows.find((row) => row.id === id);
+    if (!parent || parent.visibility === "private" || parent.status === "private") return true;
+    id = parent.parentId;
+  }
+  return false;
+}
+
+function visibleSubmission(submission, rows) {
+  const visible = new Map(visibleAnnotations(rows).map((row) => [row.id, row]));
+  const notes = (submission.noteIds || submission.notes?.map((note) => note.id) || [])
+    .map((id) => visible.get(id)).filter(Boolean).map(assistantAnnotation);
+  if (!notes.length) return null;
+  const keys = new Set(notes.map((note) => chunkContextKey(note.bookId, note.chunkId)));
+  const chunks = (submission.context?.chunks || []).filter((chunk) => keys.has(chunkContextKey(chunk.bookId, chunk.chunkId)));
+  const omittedChunks = (submission.context?.omittedChunks || []).filter((chunk) => keys.has(chunkContextKey(chunk.bookId, chunk.chunkId)));
+  const bookIds = [...new Set(notes.map((note) => note.bookId))];
+  const chunkIds = [...new Set(notes.map((note) => note.chunkId))];
+  return {
+    ...submission, notes, noteIds: notes.map((note) => note.id), count: notes.length,
+    bookIds, chunkIds, bookId: bookIds.length === 1 ? bookIds[0] : null, chunkId: chunkIds.length === 1 ? chunkIds[0] : null,
+    context: { ...submission.context, chunks, omittedChunks, noteCount: notes.length },
+    contextSummary: {
+      chunks: chunks.map(({ bookId, chunkId, title, bookTitle }) => ({ bookId, chunkId, title, bookTitle })),
+      omittedChunks, noteCount: notes.length,
+    },
+  };
+}
+
+export async function replyToAnnotation(input, { requireVisibleParent = false } = {}) {
+  return withWriteLock(async () => {
   const { parentId, note } = input;
   if (!parentId) throw new Error("parentId is required");
   if (!note) throw new Error("note is required");
 
-  const parent = (await readAllAnnotations()).find((annotation) => annotation.id === parentId);
+  const rows = await readAllAnnotations();
+  const parent = (requireVisibleParent ? visibleAnnotations(rows) : rows).find((annotation) => annotation.id === parentId);
   if (!parent) throw new Error(`Unknown parent annotation: ${parentId}`);
-  const author = input.author || "claude";
+  const author = input.author || "unknown-assistant";
   const parentStatus = parent.status || "published";
   const status =
     input.status ||
     (isHumanAuthor(author) && isPrivateHumanAnnotation(parent) ? parentStatus : "published");
 
-  return annotatePassage({
+  return saveAnnotation({
     bookId: input.bookId || parent.bookId,
     chunkId: input.chunkId || parent.chunkId,
     quote: input.quote || parent.quote,
+    anchor: (!input.quote || input.quote === parent.quote) ? publicAnnotation(parent).anchor : null,
     note,
     author,
+    role: input.role,
+    displayName: input.displayName,
     kind: input.kind || "reply",
     mood: input.mood || null,
     tags: input.tags || [],
     parentId,
     status,
+  }, { requireVisibleParent });
   });
 }
 
