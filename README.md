@@ -1,6 +1,20 @@
 # Co-Reading MCP
 
-## Reader Notes v1 (0.2.0)
+## Reader excerpts and model explanations (0.3.0)
+
+Home can now save completed OpenRouter/DeepSeek explanations with explicit model
+provenance, collect existing notes as vocabulary/terms/knowledge without copying
+their text, and persist four mark styles in five colors. Selections retain exact
+UTF-16 anchors. Personal understanding remains separate from original quotations
+and assistant writing. Model API keys and generation stay in Home's native client;
+COREADING only validates and stores completed answers. See
+[the excerpts contract](docs/reader-excerpts-contract.md) for the routes and limits.
+
+Reader notes remain backwards compatible with v1. Private assistant explanations
+and descendants of private notes are excluded from shared MCP reads just like
+private human notes; collection removal leaves the underlying note intact.
+
+## Reader Notes v1
 
 The authenticated reader API now supports precise text selections, private/shared
 human notes, editing with revision conflicts, and idempotent retries. See

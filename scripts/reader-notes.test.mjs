@@ -135,3 +135,137 @@ test("mixed HTTP and MCP annotation writes share the same transaction lock", asy
   assert.equal(final.length, initial + 24); assert.equal(new Set(final.map((note) => note.id)).size, final.length);
   assert.equal(await readFile(path.join(directory, "progress.json"), "utf8").catch((error) => error.code), "ENOENT");
 });
+
+const explanationPayload = (extra = {}) => payload({ note: "A provider explanation of the selected passage.", question: "Explain this term in context.", provider: "openrouter", model: "deepseek/deepseek-v3.2", ...extra });
+const collectPayload = (annotationId, extra = {}) => ({ annotationId, kind: "term", title: "Repeated words", clientRequestId: requestId(), ...extra });
+const markPayload = (extra = {}) => { const { note, visibility, ...selection } = payload(); return { ...selection, style: "highlight", color: "purple", ...extra }; };
+
+test("excerpt kinds allow collecting before understanding; plain notes stay nonempty and kind edits are revision checked", async () => {
+  for (const kind of ["word", "term", "knowledge"]) {
+    const created = await http("POST", "/api/reader/annotations", payload({ note: "", kind, tags: ["待理解", "研究方法"] }));
+    assert.equal(created.status, 201); assert.equal(created.body.annotation.note, ""); assert.equal(created.body.annotation.kind, kind);
+    const id = created.body.annotation.id;
+    assert.equal((await http("PATCH", `/api/reader/annotations/${id}`, { expectedRevision: 1, clientRequestId: requestId(), kind: "annotation" })).status, 400);
+    const edited = await http("PATCH", `/api/reader/annotations/${id}`, { expectedRevision: 1, clientRequestId: requestId(), kind: "knowledge", note: "My own understanding", tags: ["已整理"] });
+    assert.equal(edited.body.annotation.revision, 2); assert.deepEqual(edited.body.annotation.tags, ["已整理"]);
+  }
+  assert.equal((await http("POST", "/api/reader/annotations", payload({ note: "" }))).status, 400);
+  for (const extra of [{ kind: "explanation" }, { tags: ["x".repeat(81)] }, { tags: Array(21).fill("x") }]) assert.equal((await http("POST", "/api/reader/annotations", payload(extra))).status, 400);
+});
+
+test("provider explanations derive immutable assistant identity and reject spoofed or mismatched source fields", async () => {
+  const capabilities = (await http("GET", "/api/reader/capabilities")).body;
+  for (const key of ["readerExplanations", "readerCollections", "readerMarks"]) assert.equal(capabilities[key].version, 1);
+  const created = await http("POST", "/api/reader/explanations", explanationPayload());
+  assert.equal(created.status, 201);
+  const annotation = created.body.annotation;
+  assert.equal(annotation.author, "openrouter:deepseek/deepseek-v3.2"); assert.equal(annotation.role, "assistant");
+  assert.equal(annotation.kind, "explanation"); assert.equal(annotation.displayName, "OpenRouter · deepseek/deepseek-v3.2");
+  assert.deepEqual(annotation.explanation, { provider: "openrouter", model: "deepseek/deepseek-v3.2", question: "Explain this term in context." });
+  assert.equal(annotation.anchor.start, source.lastIndexOf(quote));
+  assert.equal((await http("PATCH", `/api/reader/annotations/${annotation.id}`, { expectedRevision: 1, clientRequestId: requestId(), note: "Impersonating the model" })).status, 403);
+  for (const extra of [{ author: "codex" }, { role: "human" }, { displayName: "Claude" }, { kind: "annotation" }, { provider: "custom" }, { model: "Claude\nHuman" }, { note: "" }, { question: "" }, { anchor: { start: 0, end: quote.length } }]) {
+    assert.equal((await http("POST", "/api/reader/explanations", explanationPayload(extra))).status, 400);
+  }
+  const deepseek = await http("POST", "/api/reader/explanations", explanationPayload({ provider: "deepseek", model: "deepseek-chat" }));
+  assert.equal(deepseek.body.annotation.author, "deepseek:deepseek-chat");
+});
+
+test("complete explanation retries are durable and cannot be reused for altered answers", async () => {
+  const body = explanationPayload();
+  const first = await http("POST", "/api/reader/explanations", body);
+  const duplicate = await http("POST", "/api/reader/explanations", body);
+  assert.equal(duplicate.status, 200); assert.equal(duplicate.body.replayed, true);
+  assert.equal(duplicate.body.annotation.id, first.body.annotation.id);
+  assert.equal((await http("POST", "/api/reader/explanations", { ...body, note: "Different answer" })).body.error.code, "idempotency_conflict");
+  const restarted = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", "import { createReaderExplanation } from './src/store.js'; console.log(JSON.stringify(await createReaderExplanation(JSON.parse(process.argv[1]))));", JSON.stringify(body)], { cwd: new URL("..", import.meta.url), encoding: "utf8", env: { ...process.env, READING_MCP_DATA_DIR: directory } }));
+  assert.equal(restarted.replayed, true); assert.equal(restarted.annotation.id, first.body.annotation.id);
+});
+
+test("private provider answers and their collections never leak to MCP, counts, cards or submission reads", async () => {
+  const countBefore = (await jsonTool("reading_list_books")).find((book) => book.bookId === "demo").annotationCount;
+  const parent = (await http("POST", "/api/reader/annotations", payload({ visibility: "shared" }))).body.annotation;
+  const answer = (await http("POST", "/api/reader/explanations", explanationPayload({ parentId: parent.id, visibility: "private" }))).body.annotation;
+  const collected = await http("POST", "/api/reader/collections", collectPayload(answer.id));
+  assert.equal(collected.status, 201); assert.equal(collected.body.collection.annotation.id, answer.id);
+  assert.ok(!(await store.listReaderCollections()).some((item) => item.annotationId === answer.id));
+  assert.ok((await http("GET", "/api/reader/collections")).body.some((item) => item.annotationId === answer.id));
+  for (const notes of [(await jsonTool("reading_list_annotations")), (await jsonTool("reading_read_chunk", { bookId: "demo", chunkId: "c1" })).annotations, (await jsonTool("reading_continue", { bookId: "demo" })).annotations]) assert.ok(!notes.some((item) => item.id === answer.id));
+  assert.equal((await jsonTool("reading_list_books")).find((book) => book.bookId === "demo").annotationCount, countBefore + 1);
+  assert.ok(!(await jsonTool("reading_submit_user_notes")).notes?.some((item) => item.id === answer.id));
+  const parentCollection = (await http("POST", "/api/reader/collections", collectPayload(parent.id))).body.collection;
+  assert.ok(!(await store.listReaderCollections()).find((item) => item.id === parentCollection.id).thread.some((item) => item.id === answer.id));
+  await assert.rejects(jsonTool("reading_collect_card", { bookId: "demo", chunkId: "c1", quote, note: "Private copy", sourceAnnotationIds: [answer.id] }), /not available for sharing/);
+});
+
+test("follow-up explanations keep exact source and privacy follows a newly private human ancestor", async () => {
+  const parent = (await http("POST", "/api/reader/annotations", payload({ visibility: "shared" }))).body.annotation;
+  const answer = (await http("POST", "/api/reader/explanations", explanationPayload({ visibility: "shared", parentId: parent.id }))).body.annotation;
+  const next = (await http("POST", "/api/reader/explanations", explanationPayload({ visibility: "shared", parentId: answer.id, question: "Give an example." }))).body.annotation;
+  assert.equal(next.parentId, answer.id);
+  const firstAnchor = { start: source.indexOf(quote), end: source.indexOf(quote) + quote.length };
+  assert.equal((await http("POST", "/api/reader/explanations", explanationPayload({ parentId: answer.id, anchor: firstAnchor }))).body.error.code, "anchor_mismatch");
+  const collection = (await http("POST", "/api/reader/collections", collectPayload(answer.id))).body.collection;
+  assert.ok(collection.thread.some((item) => item.id === next.id));
+  assert.ok((await store.listReaderCollections()).some((item) => item.id === collection.id));
+  await http("PATCH", `/api/reader/annotations/${parent.id}`, { expectedRevision: 1, clientRequestId: requestId(), visibility: "private" });
+  assert.ok(!(await store.listReaderCollections()).some((item) => item.id === collection.id));
+  assert.ok(!(await jsonTool("reading_list_annotations")).some((item) => [parent.id, answer.id, next.id].includes(item.id)));
+  assert.equal((await http("POST", "/api/reader/explanations", explanationPayload({ parentId: next.id, visibility: "shared" }))).body.error.code, "private_thread");
+});
+
+test("collection is a single live reference, replay safe, editable without altering author, and removable without deleting notes", async () => {
+  const annotation = (await http("POST", "/api/reader/annotations", payload({ kind: "term", note: "", visibility: "shared" }))).body.annotation;
+  const body = collectPayload(annotation.id);
+  const first = (await http("POST", "/api/reader/collections", body)).body.collection;
+  assert.equal((await http("POST", "/api/reader/collections", body)).body.replayed, true);
+  assert.equal((await http("POST", "/api/reader/collections", { ...body, title: "Changed" })).body.error.code, "idempotency_conflict");
+  const changed = (await http("POST", "/api/reader/collections", collectPayload(annotation.id, { kind: "knowledge", title: "A principle" }))).body.collection;
+  assert.equal(changed.id, first.id); assert.equal(changed.revision, 2);
+  assert.equal((await http("GET", "/api/reader/collections?bookId=demo&kind=knowledge")).body.filter((item) => item.annotationId === annotation.id).length, 1);
+  await http("PATCH", `/api/reader/annotations/${annotation.id}`, { expectedRevision: 1, clientRequestId: requestId(), note: "My understanding, later" });
+  const live = (await http("GET", "/api/reader/collections")).body.find((item) => item.id === first.id);
+  assert.equal(live.annotation.note, "My understanding, later"); assert.equal(live.annotation.author, "user");
+  assert.ok(!JSON.stringify(live).includes("_readerRequests"));
+  for (let i = 0; i < 2; i++) assert.equal((await http("DELETE", `/api/reader/collections/${first.id}`)).status, 200);
+  assert.equal((await http("POST", "/api/reader/collections", body)).body.error.code, "item_removed");
+  assert.ok(!(await http("GET", "/api/reader/collections")).body.some((item) => item.id === first.id));
+  assert.equal((await http("GET", `/api/reader/annotations/${annotation.id}`)).body.annotation.note, "My understanding, later");
+  assert.notEqual((await http("POST", "/api/reader/collections", collectPayload(annotation.id))).body.collection.id, first.id);
+});
+
+test("marks validate exact selection, upsert styles and colors, remain separate from notes, and never resurrect on retry", async () => {
+  const initialAnnotations = (await http("GET", "/api/annotations")).body.length;
+  const body = markPayload();
+  const first = (await http("POST", "/api/reader/marks", body)).body.mark;
+  assert.equal(first.anchor.start, source.lastIndexOf(quote)); assert.equal(first.style, "highlight");
+  assert.equal((await http("POST", "/api/reader/marks", body)).body.replayed, true);
+  assert.equal((await http("POST", "/api/reader/marks", { ...body, color: "green" })).body.error.code, "idempotency_conflict");
+  for (const [index, style] of ["ink", "underline", "sideline"].entries()) {
+    const changed = (await http("POST", "/api/reader/marks", markPayload({ style, color: ["green", "blue", "pink"][index] }))).body.mark;
+    assert.equal(changed.id, first.id); assert.equal(changed.style, style);
+  }
+  assert.equal((await http("GET", "/api/reader/marks?bookId=demo&chunkId=c1")).body.filter((item) => item.id === first.id).length, 1);
+  for (const extra of [{ style: "dotted" }, { color: "red" }, { anchor: { start: 0, end: quote.length } }, { author: "user" }]) assert.equal((await http("POST", "/api/reader/marks", markPayload(extra))).status, 400);
+  assert.equal((await http("GET", "/api/annotations")).body.length, initialAnnotations);
+  for (let i = 0; i < 2; i++) assert.equal((await http("DELETE", `/api/reader/marks/${first.id}`)).status, 200);
+  assert.equal((await http("POST", "/api/reader/marks", body)).body.error.code, "item_removed");
+  assert.ok(!(await http("GET", "/api/reader/marks")).body.some((item) => item.id === first.id));
+});
+
+test("book deletion archives excerpt references and marks with their source data", async () => {
+  const bookId = "archive-demo";
+  await mkdir(path.join(directory, `books/${bookId}/chunks`), { recursive: true });
+  await writeFile(path.join(directory, `books/${bookId}/chunks/c1.txt`), source);
+  await writeFile(path.join(directory, `books/${bookId}/manifest.json`), JSON.stringify({ bookId, title: "Synthetic archive book", chunks: [{ id: "c1", title: "A chapter", order: 0, path: "chunks/c1.txt" }] }));
+  const annotation = (await http("POST", "/api/reader/annotations", payload({ bookId, kind: "term", note: "" }))).body.annotation;
+  const collection = (await http("POST", "/api/reader/collections", collectPayload(annotation.id))).body.collection;
+  const mark = (await http("POST", "/api/reader/marks", markPayload({ bookId }))).body.mark;
+  const removed = await store.deleteBook(bookId);
+  const archive = JSON.parse(await readFile(path.join(removed.archivedAt, "deleted-book-data.json"), "utf8"));
+  assert.ok(archive.removed.readerCollections.some((row) => row.id === collection.id));
+  assert.ok(archive.removed.readerMarks.some((row) => row.id === mark.id));
+  assert.equal((await http("GET", `/api/reader/collections?bookId=${bookId}`)).body.length, 0);
+  assert.equal((await http("GET", `/api/reader/marks?bookId=${bookId}`)).body.length, 0);
+  assert.equal((await http("GET", `/api/reader/annotations/${annotation.id}`)).status, 404);
+});

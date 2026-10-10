@@ -1,5 +1,7 @@
 # Reader Notes v1
 
+Server 0.3.0 adds [excerpt kinds, collections, marks, and completed model explanations](reader-excerpts-contract.md). The v1 behavior below remains compatible, with optional kind/tags fields and empty human excerpt notes as documented there.
+
 Implementation baseline: `3dd57be3a384fc0667f09af8575c62b2279051ba`.
 
 These authenticated human-reader endpoints supplement the existing API. Existing
