@@ -12,6 +12,8 @@ export const dataDir = process.env.READING_MCP_DATA_DIR
 
 const booksDir = path.join(dataDir, "books");
 const annotationsPath = path.join(dataDir, "annotations.jsonl");
+const readerCollectionsPath = path.join(dataDir, "reader-collections.jsonl");
+const readerMarksPath = path.join(dataDir, "reader-marks.jsonl");
 const submissionsPath = path.join(dataDir, "submissions.jsonl");
 const cardsPath = path.join(dataDir, "cards.jsonl");
 const progressPath = path.join(dataDir, "progress.json");
@@ -630,6 +632,8 @@ export async function deleteBook(bookId) {
 
     const progress = await loadProgress();
     const annotations = await readAllAnnotations();
+    const collections = await readJsonl(readerCollectionsPath);
+    const marks = await readJsonl(readerMarksPath);
     const submissions = await readAllSubmissions();
     const cards = await readAllCards();
     const sessions = await readJson(sessionsPath, { sessions: {} });
@@ -690,6 +694,8 @@ export async function deleteBook(bookId) {
       removed: {
         progress: removedProgress,
         annotations: removedAnnotations,
+        readerCollections: collections.filter((row) => rowReferencesBook(row, bookIds)),
+        readerMarks: marks.filter((row) => rowReferencesBook(row, bookIds)),
         submissions: removedSubmissions,
         cards: removedCards,
         sessions: removedSessions,
@@ -698,6 +704,8 @@ export async function deleteBook(bookId) {
 
     await writeJson(progressPath, keptProgress);
     await writeJsonl(annotationsPath, keptAnnotations);
+    await writeJsonl(readerCollectionsPath, collections.filter((row) => !rowReferencesBook(row, bookIds)));
+    await writeJsonl(readerMarksPath, marks.filter((row) => !rowReferencesBook(row, bookIds)));
     await writeJsonl(submissionsPath, keptSubmissions);
     await writeJsonl(cardsPath, keptCards);
     await writeJson(sessionsPath, keptSessions);
@@ -1349,10 +1357,15 @@ export class ReaderNoteError extends Error {
   }
 }
 
-export const readerCapabilities = Object.freeze({ readerAnnotations: {
-  version: 1, write: true, reply: true, visibility: true,
-  maxNoteLength: 20000, maxQuoteLength: 12000, anchorEncoding: "utf16",
-} });
+export const readerCapabilities = Object.freeze({
+  readerAnnotations: {
+    version: 1, write: true, reply: true, visibility: true, kinds: ["annotation", "word", "term", "knowledge"], tags: true,
+    maxNoteLength: 20000, maxQuoteLength: 12000, anchorEncoding: "utf16",
+  },
+  readerExplanations: { version: 1, write: true, maxQuestionLength: 8000, maxNoteLength: 20000 },
+  readerCollections: { version: 1, write: true, kinds: ["word", "term", "knowledge"] },
+  readerMarks: { version: 1, write: true, styles: ["highlight", "ink", "underline", "sideline"], colors: ["yellow", "green", "blue", "pink", "purple"], anchorEncoding: "utf16" },
+});
 
 function noteError(status, code, message, latest) { throw new ReaderNoteError(status, code, message, latest); }
 function checkedText(value, field, maximum) {
@@ -1363,7 +1376,7 @@ function checkedText(value, field, maximum) {
 }
 function checkedRequest(input, allowed) {
   if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some((key) => !allowed.includes(key))) {
-    noteError(400, "invalid_request", "Unexpected annotation fields");
+    noteError(400, "invalid_request", "Unexpected reader request fields");
   }
   if (typeof input.clientRequestId !== "string" || !/^[A-Za-z0-9_-]{8,120}$/.test(input.clientRequestId)) {
     noteError(400, "invalid_request", "A stable clientRequestId is required");
@@ -1399,32 +1412,79 @@ export async function getReaderAnnotation(id) {
   return { annotation: publicAnnotation(row) };
 }
 
-export async function createReaderAnnotation(input) {
-  checkedRequest(input, ["bookId", "chunkId", "quote", "note", "anchor", "visibility", "clientRequestId", "parentId"]);
+function checkedKind(value, kinds = readerCapabilities.readerAnnotations.kinds) {
+  if (!kinds.includes(value)) noteError(400, "invalid_request", `kind must be one of ${kinds.join(", ")}`);
+  return value;
+}
+function checkedTags(value) {
+  if (!Array.isArray(value) || value.length > 20) noteError(400, "invalid_request", "tags must be an array of at most 20 text labels");
+  for (const tag of value) checkedText(tag, "tag", 80);
+  return [...new Set(value)];
+}
+function checkedReaderNote(value, kind) {
+  if (["word", "term", "knowledge"].includes(kind) && value === "") return value;
+  return checkedText(value, "note", 20000);
+}
+function checkedReaderSource(input) {
   checkedText(input.bookId, "bookId", 240); checkedText(input.chunkId, "chunkId", 240);
-  checkedText(input.quote, "quote", 12000); checkedText(input.note, "note", 20000);
-  const visibility = checkedVisibility(input.visibility ?? "private");
-  if (input.parentId !== undefined) checkedText(input.parentId, "parentId", 240);
+  checkedText(input.quote, "quote", 12000);
   const anchor = input.anchor;
   if (!anchor || typeof anchor !== "object" || Array.isArray(anchor) || Object.keys(anchor).some((key) => !["start", "end"].includes(key))
       || !Number.isSafeInteger(anchor.start) || !Number.isSafeInteger(anchor.end) || anchor.start < 0 || anchor.end <= anchor.start) {
     noteError(400, "invalid_request", "An exact UTF-16 anchor is required");
   }
-  const fingerprint = readerRequestHash("create", input);
+}
+async function exactReaderSource(input) {
+  let source;
+  try { source = await readChunk(input.bookId, input.chunkId); }
+  catch { noteError(404, "not_found", "Source book or chunk was not found"); }
+  if (input.anchor.end > source.text.length || source.text.slice(input.anchor.start, input.anchor.end) !== input.quote) {
+    noteError(400, "anchor_mismatch", "The selected text no longer matches the source; select it again");
+  }
+  return source;
+}
+
+export async function createReaderAnnotation(input) {
+  checkedRequest(input, ["bookId", "chunkId", "quote", "note", "anchor", "visibility", "clientRequestId", "parentId", "kind", "tags"]);
+  if (input.kind !== undefined) checkedKind(input.kind);
+  if (input.tags !== undefined) checkedTags(input.tags);
+  return createAnchoredReaderNote(input, {
+    author: "user", role: "human", displayName: "读者", kind: input.kind || (input.parentId ? "reply" : "annotation"), tags: checkedTags(input.tags || []),
+  }, "create");
+}
+
+export async function createReaderExplanation(input) {
+  checkedRequest(input, ["bookId", "chunkId", "quote", "note", "anchor", "visibility", "clientRequestId", "parentId", "question", "provider", "model"]);
+  checkedText(input.question, "question", 8000);
+  if (!["openrouter", "deepseek"].includes(input.provider)) noteError(400, "invalid_request", "provider must be openrouter or deepseek");
+  if (typeof input.model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,239}$/.test(input.model)) noteError(400, "invalid_request", "A provider model identifier is required");
+  return createAnchoredReaderNote(input, {
+    author: `${input.provider}:${input.model}`, role: "assistant",
+    displayName: `${input.provider === "openrouter" ? "OpenRouter" : "DeepSeek"} · ${input.model}`,
+    kind: "explanation", tags: [], explanation: { provider: input.provider, model: input.model, question: input.question },
+  }, "explanation");
+}
+
+async function createAnchoredReaderNote(input, identity, operation) {
+  checkedReaderSource(input); checkedReaderNote(input.note, identity.kind);
+  const visibility = checkedVisibility(input.visibility ?? "private");
+  if (input.parentId !== undefined) checkedText(input.parentId, "parentId", 240);
+  const fingerprint = readerRequestHash(operation, input);
   return withWriteLock(async () => {
     const rows = await readAllAnnotations();
     const replay = findReaderReplay(rows, input.clientRequestId, fingerprint);
     if (replay) return replay;
-    let source;
-    try { source = await readChunk(input.bookId, input.chunkId); }
-    catch { noteError(404, "not_found", "Source book or chunk was not found"); }
-    if (anchor.end > source.text.length || source.text.slice(anchor.start, anchor.end) !== input.quote) {
-      noteError(400, "anchor_mismatch", "The selected text no longer matches the source; select it again");
-    }
+    const source = await exactReaderSource(input);
     if (input.parentId) {
       const parent = rows.find((row) => row.id === input.parentId);
       if (!parent || parent.bookId !== input.bookId || parent.chunkId !== input.chunkId) {
         noteError(400, "invalid_request", "The parent note must belong to the same source chunk");
+      }
+      if (operation === "explanation") {
+        const parentAnchor = publicAnnotation(parent).anchor;
+        if (parent.quote !== input.quote || parentAnchor?.start !== input.anchor.start || parentAnchor?.end !== input.anchor.end) {
+          noteError(400, "anchor_mismatch", "An explanation follow-up must retain its parent selection");
+        }
       }
     }
     assertSharedParent(rows, input.parentId, visibility);
@@ -1432,10 +1492,9 @@ export async function createReaderAnnotation(input) {
     const annotation = {
       id: `ann_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
       bookId: input.bookId, chunkId: input.chunkId, quote: input.quote, note: input.note,
-      author: "user", role: "human", displayName: "读者", kind: input.parentId ? "reply" : "annotation",
-      mood: null, tags: [], parentId: input.parentId || null,
+      ...identity, mood: null, parentId: input.parentId || null,
       visibility, status: visibility === "shared" ? "published" : "private",
-      anchor: { start: anchor.start, end: anchor.end }, quoteOffset: anchor.start,
+      anchor: { start: input.anchor.start, end: input.anchor.end }, quoteOffset: input.anchor.start,
       prevId: source.prevId, nextId: source.nextId, revision: 1, createdAt: now, updatedAt: now,
       _readerRequests: [{ id: input.clientRequestId, hash: fingerprint }],
     };
@@ -1446,12 +1505,14 @@ export async function createReaderAnnotation(input) {
 }
 
 export async function updateReaderAnnotation(id, input) {
-  checkedRequest(input, ["expectedRevision", "clientRequestId", "note", "visibility"]);
-  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 || (input.note === undefined && input.visibility === undefined)) {
-    noteError(400, "invalid_request", "expectedRevision and a note or visibility change are required");
+  checkedRequest(input, ["expectedRevision", "clientRequestId", "note", "visibility", "kind", "tags"]);
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 || (input.note === undefined && input.visibility === undefined && input.kind === undefined && input.tags === undefined)) {
+    noteError(400, "invalid_request", "expectedRevision and a note, visibility, kind or tags change are required");
   }
-  if (input.note !== undefined) checkedText(input.note, "note", 20000);
+  if (input.note !== undefined && input.note !== "") checkedText(input.note, "note", 20000);
   if (input.visibility !== undefined) checkedVisibility(input.visibility);
+  if (input.kind !== undefined) checkedKind(input.kind);
+  if (input.tags !== undefined) checkedTags(input.tags);
   const fingerprint = readerRequestHash(`update:${id}`, input);
   return withWriteLock(async () => {
     const rows = await readAllAnnotations();
@@ -1463,8 +1524,10 @@ export async function updateReaderAnnotation(id, input) {
     const current = publicAnnotation(original);
     if (current.revision !== input.expectedRevision) noteError(409, "revision_conflict", "The note has changed; review the current version before saving", original);
     const visibility = input.visibility ?? current.visibility;
+    checkedReaderNote(input.note ?? original.note, input.kind ?? original.kind);
     assertSharedParent(rows, original.parentId, visibility);
     const updated = { ...original, note: input.note ?? original.note, role: "human",
+      kind: input.kind ?? original.kind, tags: input.tags === undefined ? original.tags : checkedTags(input.tags),
       displayName: original.displayName || "读者", visibility,
       status: visibility === "shared" ? "published" : "private",
       revision: current.revision + 1, updatedAt: new Date().toISOString(),
@@ -1475,6 +1538,124 @@ export async function updateReaderAnnotation(id, input) {
     return { annotation: publicAnnotation(updated) };
   });
 }
+
+function publicReaderItem(row) {
+  const { _readerRequests, deletedAt, ...value } = row;
+  return value;
+}
+function findItemReplay(rows, requestId, fingerprint) {
+  for (const row of rows) {
+    const request = (row._readerRequests || []).find((item) => item.id === requestId);
+    if (!request) continue;
+    if (request.hash !== fingerprint) noteError(409, "idempotency_conflict", "This request ID was already used for different content");
+    if (row.deletedAt) noteError(409, "item_removed", "This item was removed after it was saved; use a new request ID to save it again");
+    return row;
+  }
+  return null;
+}
+function readerCollectionView(item, annotations) {
+  const annotation = annotations.find((row) => row.id === item.annotationId);
+  if (!annotation) return null;
+  const byId = new Map(annotations.map((row) => [row.id, row]));
+  let root = annotation;
+  const ancestors = new Set([root.id]);
+  while (root.parentId && byId.has(root.parentId) && !ancestors.has(root.parentId)) {
+    root = byId.get(root.parentId);
+    ancestors.add(root.id);
+  }
+  const threadIds = new Set([root.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const row of annotations) {
+      if (row.bookId === annotation.bookId && row.chunkId === annotation.chunkId && threadIds.has(row.parentId) && !threadIds.has(row.id)) {
+        threadIds.add(row.id); changed = true;
+      }
+    }
+  }
+  return { ...publicReaderItem(item), annotation: publicAnnotation(annotation), thread: annotations.filter((row) => threadIds.has(row.id)).map(publicAnnotation) };
+}
+
+// Default visibility is suitable for assistant consumers. The authenticated human
+// reader explicitly opts in to private items; no snapshot of note text is stored.
+export async function listReaderCollections({ bookId, kind, includePrivate = false } = {}) {
+  const annotations = visibleAnnotations(await readAllAnnotations(), { includePrivate });
+  return (await readJsonl(readerCollectionsPath)).filter((row) => !row.deletedAt)
+    .filter((row) => !bookId || row.bookId === bookId).filter((row) => !kind || row.kind === kind)
+    .map((row) => readerCollectionView(row, annotations)).filter(Boolean)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function collectReaderAnnotation(input) {
+  checkedRequest(input, ["annotationId", "kind", "title", "clientRequestId"]);
+  checkedText(input.annotationId, "annotationId", 240);
+  checkedKind(input.kind, readerCapabilities.readerCollections.kinds); checkedText(input.title, "title", 240);
+  const fingerprint = readerRequestHash("collection", input);
+  return withWriteLock(async () => {
+    const rows = await readJsonl(readerCollectionsPath);
+    const annotations = await readAllAnnotations();
+    const replay = findItemReplay(rows, input.clientRequestId, fingerprint);
+    if (replay) return { collection: readerCollectionView(replay, annotations), replayed: true };
+    const annotation = annotations.find((row) => row.id === input.annotationId);
+    if (!annotation) noteError(404, "not_found", "Annotation was not found");
+    const original = rows.find((row) => row.annotationId === input.annotationId && !row.deletedAt);
+    const now = new Date().toISOString();
+    const collection = {
+      id: original?.id || `collection_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
+      annotationId: annotation.id, bookId: annotation.bookId, chunkId: annotation.chunkId,
+      kind: input.kind, title: input.title, createdAt: original?.createdAt || now, updatedAt: now,
+      revision: (original?.revision || 0) + 1,
+      _readerRequests: [...(original?._readerRequests || []), { id: input.clientRequestId, hash: fingerprint }],
+    };
+    await writeJsonl(readerCollectionsPath, original ? rows.map((row) => row.id === original.id ? collection : row) : [...rows, collection]);
+    return { collection: readerCollectionView(collection, annotations) };
+  });
+}
+
+async function deleteReaderItem(filePath, id) {
+  checkedText(id, "id", 240);
+  return withWriteLock(async () => {
+    const rows = await readJsonl(filePath);
+    const original = rows.find((row) => row.id === id);
+    if (!original) noteError(404, "not_found", "Reader item was not found");
+    if (!original.deletedAt) await writeJsonl(filePath, rows.map((row) => row.id === id ? { ...row, deletedAt: new Date().toISOString() } : row));
+    return { deleted: true, id };
+  });
+}
+export async function deleteReaderCollection(id) { return deleteReaderItem(readerCollectionsPath, id); }
+
+export async function listReaderMarks({ bookId, chunkId } = {}) {
+  return (await readJsonl(readerMarksPath)).filter((row) => !row.deletedAt)
+    .filter((row) => !bookId || row.bookId === bookId).filter((row) => !chunkId || row.chunkId === chunkId)
+    .map(publicReaderItem);
+}
+export async function saveReaderMark(input) {
+  checkedRequest(input, ["bookId", "chunkId", "quote", "anchor", "style", "color", "clientRequestId"]);
+  checkedReaderSource(input);
+  if (!readerCapabilities.readerMarks.styles.includes(input.style) || !readerCapabilities.readerMarks.colors.includes(input.color)) {
+    noteError(400, "invalid_request", "A supported mark style and color are required");
+  }
+  const fingerprint = readerRequestHash("mark", input);
+  return withWriteLock(async () => {
+    const rows = await readJsonl(readerMarksPath);
+    const replay = findItemReplay(rows, input.clientRequestId, fingerprint);
+    if (replay) return { mark: publicReaderItem(replay), replayed: true };
+    await exactReaderSource(input);
+    const original = rows.find((row) => !row.deletedAt && row.bookId === input.bookId && row.chunkId === input.chunkId && row.anchor.start === input.anchor.start && row.anchor.end === input.anchor.end);
+    const now = new Date().toISOString();
+    const mark = {
+      id: original?.id || `mark_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`,
+      bookId: input.bookId, chunkId: input.chunkId, quote: input.quote,
+      anchor: { start: input.anchor.start, end: input.anchor.end },
+      style: input.style, color: input.color,
+      createdAt: original?.createdAt || now, updatedAt: now, revision: (original?.revision || 0) + 1,
+      _readerRequests: [...(original?._readerRequests || []), { id: input.clientRequestId, hash: fingerprint }],
+    };
+    await writeJsonl(readerMarksPath, original ? rows.map((row) => row.id === original.id ? mark : row) : [...rows, mark]);
+    return { mark: publicReaderItem(mark) };
+  });
+}
+export async function deleteReaderMark(id) { return deleteReaderItem(readerMarksPath, id); }
 
 export async function submitUserNotes({
   bookId,

@@ -1,6 +1,6 @@
 {
   "name": "co-reading-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A local co-reading MCP server for chunked books, reading progress, search, and margin annotations.",
   "type": "module",
   "author": "GPT, Claude, and Koshi",
