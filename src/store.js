@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { buildCardCandidates, pickCard } from "../public/card-logic.js";
+import { bookCoverCapabilities, BookCoverError, coverMetadata, normalizeBookCover, readCoverFile, writeCoverFile } from "./book-covers.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -592,11 +593,14 @@ export async function listBooks({ includePrivate = false } = {}) {
     try {
       const manifest = await loadManifest(entry.name);
       const summary = progressSummary(manifest, progress[manifest.bookId] || {});
+      // A missing or damaged optional cover must never hide a readable book.
+      const cover = await readCoverFile(resolveInside(booksDir, entry.name)).catch(() => null);
       books.push({
         bookId: manifest.bookId,
         title: manifest.title,
         author: manifest.author || null,
         language: manifest.language || null,
+        cover: coverMetadata(cover),
         chunkCount: manifest.chunks.length,
         chunksRead: summary.chunksRead,
         annotationCount: bookCounts.get(manifest.bookId) || 0,
@@ -609,6 +613,36 @@ export async function listBooks({ includePrivate = false } = {}) {
     }
   }
   return books.sort((a, b) => a.title.localeCompare(b.title));
+}
+
+function checkedCoverBookId(bookId) {
+  if (typeof bookId !== "string" || !/^[A-Za-z0-9._\-\u4e00-\u9fff]+$/u.test(bookId) || bookId.includes("..")) {
+    throw new BookCoverError(400, "invalid_cover", "A valid book identifier is required");
+  }
+  return bookId;
+}
+async function existingCoverBook(bookId) {
+  checkedCoverBookId(bookId);
+  try { await loadManifest(bookId); }
+  catch { throw new BookCoverError(404, "not_found", "The book was not found"); }
+  return resolveInside(booksDir, bookId);
+}
+export async function getBookCover(bookId) {
+  return { bookId, cover: await readCoverFile(await existingCoverBook(bookId)) };
+}
+export async function saveBookCover(bookId, input) {
+  await existingCoverBook(bookId);
+  const cover = await normalizeBookCover(input);
+  return withWriteLock(async () => {
+    // Recheck after decoding, since deleting a book may have happened meanwhile.
+    const bookDir = await existingCoverBook(bookId);
+    if (input.ifAbsent === true) {
+      const existing = await readCoverFile(bookDir);
+      if (existing) return { bookId, cover: coverMetadata(existing) };
+    }
+    await writeCoverFile(bookDir, cover);
+    return { bookId, cover: coverMetadata(cover) };
+  });
 }
 
 function rowReferencesBook(row, bookIds) {
@@ -1358,6 +1392,7 @@ export class ReaderNoteError extends Error {
 }
 
 export const readerCapabilities = Object.freeze({
+  bookCovers: bookCoverCapabilities,
   readerAnnotations: {
     version: 1, write: true, reply: true, visibility: true, kinds: ["annotation", "word", "term", "knowledge"], tags: true,
     maxNoteLength: 20000, maxQuoteLength: 12000, anchorEncoding: "utf16",

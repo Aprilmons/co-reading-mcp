@@ -25,6 +25,8 @@ import {
   listCards,
   listAnnotations,
   listBooks,
+  getBookCover,
+  saveBookCover,
   listChunks,
   markRead,
   readCard,
@@ -34,6 +36,7 @@ import {
   submitUserNotes,
 } from "./store.js";
 import { importBook } from "./importer.js";
+import { BookCoverError, bookCoverCapabilities } from "./book-covers.js";
 import { renderCardPng, renderCardSvg } from "./card-renderer.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -82,6 +85,25 @@ function routeParts(url) {
 export async function handleApi(req, res, url, options = {}) {
   const parts = routeParts(url);
   const maxBytes = options.maxBodyBytes || defaultMaxBodyBytes;
+
+  if (parts.length === 4 && parts[1] === "books" && parts[3] === "cover") {
+    try {
+      if (req.method === "GET") return sendJson(res, 200, await getBookCover(parts[2]));
+      if (req.method === "POST") {
+        let body;
+        try { body = await readBody(req, { maxBytes: Math.ceil(bookCoverCapabilities.maxEpubBytes / 3) * 4 + 1024, allowEmpty: false }); }
+        catch (error) {
+          const tooLarge = /exceeds/.test(error.message || "");
+          return sendJson(res, tooLarge ? 413 : 400, { error: { code: tooLarge ? "too_large" : "invalid_cover", message: tooLarge ? "The cover upload is too large" : "A valid cover upload is required" } });
+        }
+        return sendJson(res, 200, await saveBookCover(parts[2], body));
+      }
+      return sendJson(res, 405, { error: { code: "method_not_allowed", message: "Use GET or POST for book covers" } });
+    } catch (error) {
+      if (!(error instanceof BookCoverError)) throw error;
+      return sendJson(res, error.status, { error: { code: error.code, message: error.message } });
+    }
+  }
 
   if (parts[1] === "reader") {
     try {

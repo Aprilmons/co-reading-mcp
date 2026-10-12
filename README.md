@@ -1,5 +1,19 @@
 # Co-Reading MCP
 
+## Book covers (0.3.1)
+
+EPUB imports now keep a small cover thumbnail when the book identifies a supported
+cover image. Existing books can receive a cover through a separate authenticated
+endpoint, by sending their original EPUB or a JPEG/PNG/WebP image. This operation
+only writes `books/<bookId>/cover.json`; it does not reimport text or change existing
+chunks, annotations, progress, or the manifest. Original uploads are not retained.
+
+The reader capability response advertises `bookCovers`. Book lists return optional
+`cover` metadata; old books without one remain readable. See
+[the cover API contract](docs/book-covers-contract.md) for client integration and
+upload limits. Docker includes Pillow; local installs need `python3 -m pip install Pillow`
+for cover processing. Plain text reading does not need it.
+
 ## Reader excerpts and model explanations (0.3.0)
 
 Home can now save completed OpenRouter/DeepSeek explanations with explicit model

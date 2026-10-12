@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import json
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -17,6 +18,7 @@ import zipfile
 from pathlib import Path
 
 from import_text import slugify, write_book_sections
+from book_cover import CoverError, extract_cover, validate_zip
 
 
 CONTAINER = "META-INF/container.xml"
@@ -207,6 +209,7 @@ def html_files(zf: zipfile.ZipFile) -> list[str]:
 
 def read_epub(path: Path) -> tuple[str | None, str | None, list[dict[str, str]]]:
     with zipfile.ZipFile(path) as zf:
+        validate_zip(zf)
         opf_path = find_opf_path(zf)
         title = None
         author = None
@@ -278,6 +281,13 @@ def main() -> None:
         args.max_chars,
         {"type": "epub", "fileName": args.input.name},
     )
+    # Cover extraction is optional; it never changes the text chunk boundaries.
+    try:
+        cover = extract_cover(args.input)
+        if cover:
+            (book_dir / "cover.json").write_text(json.dumps(cover) + "\n", encoding="utf-8")
+    except (CoverError, KeyError, ET.ParseError, ImportError, OSError):
+        print("Cover unavailable; imported text remains readable.", file=sys.stderr)
     print(book_dir)
 
 

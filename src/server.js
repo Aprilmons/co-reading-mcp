@@ -550,7 +550,7 @@ export async function handle(message) {
   if (message.method === "initialize") {
     return result(message.id, {
       protocolVersion,
-      serverInfo: { name: "co-reading-mcp", version: "0.3.0" },
+      serverInfo: { name: "co-reading-mcp", version: "0.3.1" },
       capabilities: { tools: {} },
       instructions:
         `Use this server as a shared co-reading surface. ` +
