@@ -5,6 +5,7 @@ import {
   annotatePassage,
   createReaderAnnotation,
   createReaderExplanation,
+  deleteReaderExplanation,
   listReaderCollections,
   collectReaderAnnotation,
   deleteReaderCollection,
@@ -107,7 +108,7 @@ export async function handleApi(req, res, url, options = {}) {
 
   if (parts[1] === "reader") {
     try {
-      if (req.method === "GET" && parts.length === 3 && parts[2] === "capabilities") return sendJson(res, 200, readerCapabilities);
+      if (req.method === "GET" && parts.length === 3 && parts[2] === "capabilities") return sendJson(res, 200, { ...readerCapabilities, readerExplanations: { ...readerCapabilities.readerExplanations, delete: options.readerDeleteAuthenticated === true } });
       if (req.method === "GET" && parts.length === 3 && parts[2] === "collections") return sendJson(res, 200, await listReaderCollections({ bookId: url.searchParams.get("bookId") || undefined, kind: url.searchParams.get("kind") || undefined, includePrivate: true }));
       if (req.method === "GET" && parts.length === 3 && parts[2] === "marks") return sendJson(res, 200, await listReaderMarks({ bookId: url.searchParams.get("bookId") || undefined, chunkId: url.searchParams.get("chunkId") || undefined }));
       if (req.method === "GET" && parts.length === 4 && parts[2] === "annotations") return sendJson(res, 200, await getReaderAnnotation(parts[3]));
@@ -116,7 +117,9 @@ export async function handleApi(req, res, url, options = {}) {
       }
       const create = req.method === "POST" && parts.length === 3 && ["annotations", "explanations", "collections", "marks"].includes(parts[2]);
       const edit = req.method === "PATCH" && parts.length === 4 && parts[2] === "annotations";
-      if (create || edit) {
+      const remove = req.method === "DELETE" && parts.length === 4 && parts[2] === "explanations";
+      if (remove && options.readerDeleteAuthenticated !== true) return sendJson(res, 403, { error: { code: "unauthorized", message: "Deleting an explanation requires an authenticated reader" } });
+      if (create || edit || remove) {
         let body;
         try { body = await readBody(req, { maxBytes: Math.min(maxBytes, 160000), allowEmpty: false }); }
         catch (error) {
@@ -124,7 +127,7 @@ export async function handleApi(req, res, url, options = {}) {
           return sendJson(res, tooLarge ? 413 : 400, { error: { code: tooLarge ? "too_large" : "invalid_request", message: tooLarge ? "Reader request is too large" : "A valid JSON reader request is required" } });
         }
         const handlers = { annotations: createReaderAnnotation, explanations: createReaderExplanation, collections: collectReaderAnnotation, marks: saveReaderMark };
-        const result = edit ? await updateReaderAnnotation(parts[3], body) : await handlers[parts[2]](body);
+        const result = remove ? await deleteReaderExplanation(parts[3], body) : edit ? await updateReaderAnnotation(parts[3], body) : await handlers[parts[2]](body);
         return sendJson(res, create && !result.replayed ? 201 : 200, result);
       }
       return sendJson(res, 404, { error: { code: "not_found", message: "Reader endpoint was not found" } });

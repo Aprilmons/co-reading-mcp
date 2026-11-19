@@ -1,5 +1,9 @@
 # Co-Reading MCP
 
+## Remove a reader-created AI explanation (0.3.2)
+
+The authenticated desktop reader can remove a saved AI answer on its originating device. `GET /api/reader/capabilities` advertises `readerExplanations.delete` only for requests using the configured bearer token. Send `DELETE /api/reader/explanations/:id` with the original `clientRequestId` (`explanation_<original run UUID>`) and `expectedRevision`; on success the response is `{deleted:true,id}` and `GET /api/reader/annotations/:id` returns 404. Repeating the same removal is safe. An annotation ID alone cannot remove a partner's note. Replies, a reference from the excerpt collection, or a dependent reading card block deletion; no data is cascaded. Deletion removes the content from the current annotation store and only retains an opaque receipt to reject stale replays.
+
 ## Book covers (0.3.1)
 
 EPUB imports now keep a small cover thumbnail when the book identifies a supported

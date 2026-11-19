@@ -134,7 +134,7 @@ async function route(req, res) {
   }
 
   if (url.pathname.startsWith("/api/")) {
-    return handleApi(req, res, url, { maxBodyBytes });
+    return handleApi(req, res, url, { maxBodyBytes, readerDeleteAuthenticated: Boolean(authToken) && req.headers.authorization === `Bearer ${authToken}` });
   }
 
   if (req.method === "POST" && url.pathname === "/mcp") {
