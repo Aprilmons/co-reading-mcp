@@ -737,7 +737,7 @@ export async function deleteBook(bookId) {
     });
 
     await writeJson(progressPath, keptProgress);
-    await writeJsonl(annotationsPath, keptAnnotations);
+    await writeAnnotations(keptAnnotations);
     await writeJsonl(readerCollectionsPath, collections.filter((row) => !rowReferencesBook(row, bookIds)));
     await writeJsonl(readerMarksPath, marks.filter((row) => !rowReferencesBook(row, bookIds)));
     await writeJsonl(submissionsPath, keptSubmissions);
@@ -1087,7 +1087,14 @@ function countBy(values) {
 }
 
 async function readAllAnnotations() {
-  return readJsonl(annotationsPath);
+  return (await readJsonl(annotationsPath)).filter((row) => !row._removedExplanation);
+}
+
+// Keep lightweight deletion receipts out of every note view and count. All writers
+// operate under withWriteLock; preserve receipts in the same atomic file as live notes.
+async function writeAnnotations(liveRows) {
+  const receipts = (await readJsonl(annotationsPath)).filter((row) => row._removedExplanation);
+  await writeJsonl(annotationsPath, [...liveRows, ...receipts]);
 }
 
 async function readJsonl(filePath) {
@@ -1125,9 +1132,9 @@ function cardSummary(card) {
   return summary;
 }
 
-async function visibleCards(cards, { includePrivate = false } = {}) {
+async function visibleCards(cards, { includePrivate = false, annotationRows } = {}) {
   if (includePrivate) return cards;
-  const annotations = await readAllAnnotations();
+  const annotations = annotationRows ?? await readAllAnnotations();
   const visibleIds = new Set(visibleAnnotations(annotations).map((annotation) => annotation.id));
   const hidden = annotations.filter((annotation) => !visibleIds.has(annotation.id));
   return cards.filter((card) => {
@@ -1377,7 +1384,7 @@ async function saveAnnotation(input, { requireVisibleParent = false } = {}) {
       ? `Saved reply ${replyIndex} under annotation ${parentId}.`
       : `Saved annotation ${annotationIndexInBook} in this book (${annotationIndexInChunk} in this chunk).`;
 
-    await writeJsonl(annotationsPath, [...existingAnnotations, annotation]);
+    await writeAnnotations([...existingAnnotations, annotation]);
     invalidateAnnotationCache();
     return publicAnnotation(annotation);
 }
@@ -1397,7 +1404,7 @@ export const readerCapabilities = Object.freeze({
     version: 1, write: true, reply: true, visibility: true, kinds: ["annotation", "word", "term", "knowledge"], tags: true,
     maxNoteLength: 20000, maxQuoteLength: 12000, anchorEncoding: "utf16",
   },
-  readerExplanations: { version: 1, write: true, maxQuestionLength: 8000, maxNoteLength: 20000 },
+  readerExplanations: { version: 1, write: true, delete: true, maxQuestionLength: 8000, maxNoteLength: 20000 },
   readerCollections: { version: 1, write: true, kinds: ["word", "term", "knowledge"] },
   readerMarks: { version: 1, write: true, styles: ["highlight", "ink", "underline", "sideline"], colors: ["yellow", "green", "blue", "pink", "purple"], anchorEncoding: "utf16" },
 });
@@ -1506,7 +1513,12 @@ async function createAnchoredReaderNote(input, identity, operation) {
   if (input.parentId !== undefined) checkedText(input.parentId, "parentId", 240);
   const fingerprint = readerRequestHash(operation, input);
   return withWriteLock(async () => {
-    const rows = await readAllAnnotations();
+    const stored = await readJsonl(annotationsPath);
+    const proof = explanationProof(input.clientRequestId);
+    if (stored.some((row) => row._removedExplanation?.proof === proof)) {
+      noteError(409, "item_removed", "This explanation was deleted; the old save cannot recreate it");
+    }
+    const rows = stored.filter((row) => !row._removedExplanation);
     const replay = findReaderReplay(rows, input.clientRequestId, fingerprint);
     if (replay) return replay;
     const source = await exactReaderSource(input);
@@ -1533,9 +1545,60 @@ async function createAnchoredReaderNote(input, identity, operation) {
       prevId: source.prevId, nextId: source.nextId, revision: 1, createdAt: now, updatedAt: now,
       _readerRequests: [{ id: input.clientRequestId, hash: fingerprint }],
     };
-    await writeJsonl(annotationsPath, [...rows, annotation]);
+    await writeJsonl(annotationsPath, [...stored, annotation]);
     invalidateAnnotationCache();
     return { annotation: publicAnnotation(annotation) };
+  });
+}
+
+// Mozi 1.8.5 already used a random UUID in the creation request. This value
+// is never part of publicAnnotation; a visible annotation ID is not proof.
+function explanationProof(requestId) {
+  return crypto.createHash("sha256").update(requestId).digest("hex");
+}
+
+export async function deleteReaderExplanation(id, input) {
+  checkedText(id, "id", 240);
+  checkedRequest(input, ["expectedRevision", "clientRequestId"]);
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    noteError(400, "invalid_request", "expectedRevision must be a positive integer");
+  }
+  const proof = explanationProof(input.clientRequestId);
+  return withWriteLock(async () => {
+    const stored = await readJsonl(annotationsPath);
+    const row = stored.find((item) => item.id === id);
+    if (!row) noteError(404, "not_found", "Explanation not found");
+    const receipt = row._removedExplanation;
+    const explanation = row.explanation;
+    const owned = receipt ? receipt.proof === proof : row.role === "assistant" && row.kind === "explanation"
+      && ["openrouter", "deepseek"].includes(explanation?.provider)
+      && row.author === `${explanation.provider}:${explanation.model}`
+      && row._readerRequests?.[0]?.id === input.clientRequestId;
+    if (!owned || !/^explanation_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.clientRequestId)) {
+      noteError(403, "not_owner", "Only the original reader request can remove this AI explanation");
+    }
+    if (input.expectedRevision !== (receipt?.revision ?? publicAnnotation(row).revision)) {
+      noteError(409, "revision_conflict", "The explanation changed; refresh before deleting it");
+    }
+    if (receipt) return { deleted: true, id };
+    const live = stored.filter((item) => !item._removedExplanation);
+    if (live.some((item) => item.parentId === id)) noteError(409, "has_replies", "This explanation has replies");
+    if ((await readJsonl(readerCollectionsPath)).some((item) => !item.deletedAt && item.annotationId === id)) {
+      noteError(409, "in_collection", "Remove this explanation from the excerpt collection first");
+    }
+    const cards = await readAllCards();
+    // Match explicit source references; for legacy copied cards, deletion must
+    // never make a formerly hidden card visible by removing its privacy guard.
+    const exposed = new Set((await visibleCards(cards, { annotationRows: live })).map((card) => card.id));
+    const after = live.filter((item) => item.id !== id);
+    if (cards.some((card) => card.sourceAnnotationIds?.includes(id) || card.context?.selectedAnnotationId === id)
+        || (await visibleCards(cards, { annotationRows: after })).some((card) => !exposed.has(card.id))) {
+      noteError(409, "in_card", "A reading card depends on this explanation");
+    }
+    await writeJsonl(annotationsPath, stored.map((item) => item.id === id
+      ? { id, _removedExplanation: { proof, revision: input.expectedRevision } } : item));
+    invalidateAnnotationCache();
+    return { deleted: true, id };
   });
 }
 
@@ -1568,7 +1631,7 @@ export async function updateReaderAnnotation(id, input) {
       revision: current.revision + 1, updatedAt: new Date().toISOString(),
       _readerRequests: [...(original._readerRequests || []), { id: input.clientRequestId, hash: fingerprint }],
     };
-    await writeJsonl(annotationsPath, rows.map((row) => row.id === id ? updated : row));
+    await writeAnnotations(rows.map((row) => row.id === id ? updated : row));
     invalidateAnnotationCache();
     return { annotation: publicAnnotation(updated) };
   });
@@ -1755,14 +1818,14 @@ export async function submitUserNotes({
           noteCount: context.noteCount,
         },
       };
-      await writeJsonl(annotationsPath, updated);
+      await writeAnnotations(updated);
       invalidateAnnotationCache();
       try {
         await saveSessionLedger(ledger);
         await mkdir(dataDir, { recursive: true });
         await appendFile(submissionsPath, `${JSON.stringify({ ...submission, notes: submitted, context })}\n`, "utf8");
       } catch (error) {
-        await writeJsonl(annotationsPath, annotations);
+        await writeAnnotations(annotations);
         invalidateAnnotationCache();
         throw error;
       }
